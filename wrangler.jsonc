@@ -1,0 +1,27 @@
+{
+    "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/schemas/wrangler.jsonc",
+    "name": "openalex-api-analytics",
+    "main": "src/index.ts",
+    "compatibility_date": "2025-10-03",
+    "workers_dev": true,
+
+    // Analytics Engine dataset name (for SQL queries)
+    // ACCOUNT_ID and API_TOKEN are stored as secrets
+    "vars": {
+        "ANALYTICS_DATASET": "openalex_requests_v2"
+    },
+
+    // D1 Database binding - same database as your proxy
+    "d1_databases": [
+        {
+            "binding": "DB",
+            "database_name": "openalex-db",
+            "database_id": "769bdd92-0544-4135-b2e4-c67f1df17994"
+        }
+    ],
+
+    "observability": {
+        "enabled": true,
+        "head_sampling_rate": 0.1
+    }
+}
