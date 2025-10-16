@@ -355,6 +355,107 @@ export async function getUserStatusBreakdown(env: Env, apiKey: string, period: P
 }
 
 /**
+ * Get timeline data for a specific user with status code breakdown
+ */
+export async function getUserTimeline(env: Env, apiKey: string, period: Period = 'hour'): Promise<any[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+    const bucketInterval = period === 'hour' ? "INTERVAL '5' MINUTE" : "INTERVAL '1' HOUR";
+
+    const query = `
+        SELECT
+            timeBucket,
+            statusCode,
+            SUM(sampleInterval) as requestCount,
+            SUM(weightedResponseTime) / SUM(sampleInterval) as avgResponseTime
+        FROM (
+            SELECT
+                toStartOfInterval(timestamp, ${bucketInterval}) as timeBucket,
+                toUInt32(double2) as statusCode,
+                _sample_interval as sampleInterval,
+                double1 * _sample_interval as weightedResponseTime
+            FROM ${env.ANALYTICS_DATASET}
+            WHERE timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+                AND blob1 = '${apiKey}'
+        )
+        GROUP BY timeBucket, statusCode
+        ORDER BY timeBucket ASC, statusCode ASC
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+
+        return results.map((result: any) => ({
+            timestamp: result.timeBucket,
+            statusCode: Number(result.statusCode),
+            requestCount: Math.round(Number(result.requestCount)),
+            avgResponseTime: Math.round(Number(result.avgResponseTime) * 100) / 100
+        }));
+    } catch (error) {
+        console.error('Error querying user timeline:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get timeline data for a specific anonymous bucket with status code breakdown
+ */
+export async function getAnonymousTimeline(env: Env, bucket: string, period: Period = 'hour'): Promise<any[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+    const bucketInterval = period === 'hour' ? "INTERVAL '5' MINUTE" : "INTERVAL '1' HOUR";
+
+    // Extract bucket number from format "anon_123"
+    const bucketMatch = bucket.match(/^anon_(\d+)$/);
+    if (!bucketMatch) {
+        throw new Error('Invalid bucket format');
+    }
+
+    // Use prefix matching with string comparison
+    // Match all entries from anon_N_ up to (but not including) anon_(N+1)_
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
+    const query = `
+        SELECT
+            timeBucket,
+            statusCode,
+            SUM(sampleInterval) as requestCount,
+            SUM(weightedResponseTime) / SUM(sampleInterval) as avgResponseTime
+        FROM (
+            SELECT
+                toStartOfInterval(timestamp, ${bucketInterval}) as timeBucket,
+                toUInt32(double2) as statusCode,
+                _sample_interval as sampleInterval,
+                double1 * _sample_interval as weightedResponseTime
+            FROM ${env.ANALYTICS_DATASET}
+            WHERE timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+                AND blob1 = ''
+                AND index1 >= '${prefix}'
+                AND index1 < '${prefixEnd}'
+        )
+        GROUP BY timeBucket, statusCode
+        ORDER BY timeBucket ASC, statusCode ASC
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+
+        return results.map((result: any) => ({
+            timestamp: result.timeBucket,
+            statusCode: Number(result.statusCode),
+            requestCount: Math.round(Number(result.requestCount)),
+            avgResponseTime: Math.round(Number(result.avgResponseTime) * 100) / 100
+        }));
+    } catch (error) {
+        console.error('Error querying anonymous timeline:', error);
+        throw error;
+    }
+}
+
+/**
  * Get status code breakdown for a specific anonymous bucket
  */
 export async function getAnonymousStatusBreakdown(env: Env, bucket: string, period: Period = 'hour'): Promise<StatusCodeBreakdown[]> {
@@ -367,6 +468,13 @@ export async function getAnonymousStatusBreakdown(env: Env, bucket: string, peri
         throw new Error('Invalid bucket format');
     }
 
+    // Use prefix matching with string comparison
+    // Match all entries from anon_N_ up to (but not including) anon_(N+1)_
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
     const query = `
         SELECT
             toUInt32(double2) as statusCode,
@@ -375,7 +483,8 @@ export async function getAnonymousStatusBreakdown(env: Env, bucket: string, peri
         WHERE
             timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
             AND blob1 = ''
-            AND index1 LIKE 'anon_${bucketMatch[1]}_%'
+            AND index1 >= '${prefix}'
+            AND index1 < '${prefixEnd}'
         GROUP BY double2
         ORDER BY requestCount DESC
     `;

@@ -1,5 +1,5 @@
 import type { Env, Period, TopUsersResponse, TopAnonymousResponse, TimelineResponse } from './types';
-import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown } from './queries';
+import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown, getUserTimeline, getAnonymousTimeline } from './queries';
 
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -103,6 +103,26 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
                 return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
             }
             const data = await getAnonymousStatusBreakdown(env, bucket, period);
+            return jsonResponse({ period, data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: User timeline with status code breakdown
+        if (url.pathname === '/api/user-timeline') {
+            const apiKey = url.searchParams.get('apiKey');
+            if (!apiKey) {
+                return jsonResponse({ error: 'apiKey parameter is required' }, 400, corsHeaders);
+            }
+            const data = await getUserTimeline(env, apiKey, period);
+            return jsonResponse({ period, data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Anonymous timeline with status code breakdown
+        if (url.pathname === '/api/anonymous-timeline') {
+            const bucket = url.searchParams.get('bucket');
+            if (!bucket) {
+                return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
+            }
+            const data = await getAnonymousTimeline(env, bucket, period);
             return jsonResponse({ period, data, timestamp: new Date().toISOString() }, 200, corsHeaders);
         }
 
@@ -214,10 +234,26 @@ function getHtmlDashboard(): string {
             <p class="text-red-800 font-medium"></p>
         </div>
 
+        <!-- User Context Banner (hidden by default) -->
+        <div id="userContext" class="hidden glass rounded-lg shadow-xl p-4 mb-6 bg-gradient-to-r from-indigo-50 to-purple-50">
+            <div class="flex items-center justify-between">
+                <div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm text-gray-600">Viewing:</span>
+                        <h3 class="text-lg font-bold text-gray-800" id="contextUserName"></h3>
+                    </div>
+                    <p class="text-sm text-gray-600" id="contextUserEmail"></p>
+                </div>
+                <button id="backToOverview" class="px-4 py-2 rounded-lg bg-gray-600 text-white font-medium hover:bg-gray-700 transition">
+                    ← Back to Overview
+                </button>
+            </div>
+        </div>
+
         <!-- Usage Timeline Chart -->
         <div class="glass rounded-lg shadow-xl p-6 mb-6">
-            <h2 class="text-xl font-bold text-gray-800 mb-4">Usage Timeline</h2>
-            <div class="relative h-64">
+            <h2 class="text-xl font-bold text-gray-800 mb-4" id="timelineTitle">Usage Timeline</h2>
+            <div class="relative h-80">
                 <canvas id="timelineChart"></canvas>
             </div>
         </div>
@@ -273,35 +309,21 @@ function getHtmlDashboard(): string {
             </div>
         </div>
 
-        <!-- User Status Breakdown View (hidden by default) -->
-        <div id="breakdownView" class="hidden">
-            <div class="glass rounded-lg shadow-xl p-6 mb-6">
-                <div class="flex items-center justify-between mb-4">
-                    <div>
-                        <h2 class="text-2xl font-bold text-gray-800" id="breakdownUserName">User Breakdown</h2>
-                        <p class="text-sm text-gray-600" id="breakdownUserEmail"></p>
-                    </div>
-                    <button id="backButton" class="px-4 py-2 rounded-lg bg-gray-600 text-white font-medium hover:bg-gray-700 transition">
-                        ← Back to Overview
-                    </button>
+        <!-- Status Breakdown Section (hidden by default) -->
+        <div id="statusBreakdown" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Status Code Chart -->
+            <div class="glass rounded-lg shadow-xl p-6">
+                <h3 class="text-xl font-bold text-gray-800 mb-4">Status Code Distribution</h3>
+                <div class="relative h-64">
+                    <canvas id="statusChart"></canvas>
                 </div>
             </div>
 
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <!-- Status Code Chart -->
-                <div class="glass rounded-lg shadow-xl p-6">
-                    <h3 class="text-xl font-bold text-gray-800 mb-4">Status Code Distribution</h3>
-                    <div class="relative h-64">
-                        <canvas id="statusChart"></canvas>
-                    </div>
-                </div>
-
-                <!-- Status Code Table -->
-                <div class="glass rounded-lg shadow-xl p-6">
-                    <h3 class="text-xl font-bold text-gray-800 mb-4">Detailed Breakdown</h3>
-                    <div id="statusTableContainer">
-                        <!-- Will be populated dynamically -->
-                    </div>
+            <!-- Status Code Table -->
+            <div class="glass rounded-lg shadow-xl p-6">
+                <h3 class="text-xl font-bold text-gray-800 mb-4">Detailed Breakdown</h3>
+                <div id="statusTableContainer">
+                    <!-- Will be populated dynamically -->
                 </div>
             </div>
         </div>
@@ -311,6 +333,13 @@ function getHtmlDashboard(): string {
         // State
         let currentPeriod = 'hour';
         let timelineChart = null;
+        let currentView = {
+            type: 'overview', // 'overview', 'user', or 'anonymous'
+            apiKey: null,
+            bucket: null,
+            name: null,
+            email: null
+        };
 
         // DOM elements
         const btnHour = document.getElementById('btnHour');
@@ -319,11 +348,14 @@ function getHtmlDashboard(): string {
         const loading = document.getElementById('loading');
         const error = document.getElementById('error');
         const lastUpdated = document.getElementById('lastUpdated');
+        const userContext = document.getElementById('userContext');
+        const statusBreakdown = document.getElementById('statusBreakdown');
+        const mainView = document.getElementById('mainView');
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            loadData();
             setupEventListeners();
+            loadFromURL(); // Check URL params first
         });
 
         // Event listeners
@@ -343,6 +375,73 @@ function getHtmlDashboard(): string {
             btnRefresh.addEventListener('click', () => {
                 loadData();
             });
+
+            // Back to overview button
+            const backBtn = document.getElementById('backToOverview');
+            if (backBtn) {
+                backBtn.addEventListener('click', () => {
+                    showOverview();
+                });
+            }
+
+            // Handle browser back/forward
+            window.addEventListener('popstate', (e) => {
+                if (e.state) {
+                    currentView = e.state;
+                    loadData();
+                } else {
+                    loadFromURL();
+                }
+            });
+        }
+
+        // URL management
+        function loadFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            const apiKey = params.get('user');
+            const bucket = params.get('anonymous');
+            const period = params.get('period');
+
+            if (period && (period === 'hour' || period === 'day')) {
+                currentPeriod = period;
+                updatePeriodButtons();
+            }
+
+            if (apiKey) {
+                // Will load user data, but need to fetch user info first
+                currentView = { type: 'user', apiKey, bucket: null, name: null, email: null };
+                loadData();
+            } else if (bucket) {
+                currentView = { type: 'anonymous', apiKey: null, bucket, name: bucket, email: 'Anonymous User Group' };
+                loadData();
+            } else {
+                showOverview();
+            }
+        }
+
+        function updateURL(pushState = true) {
+            const params = new URLSearchParams();
+            params.set('period', currentPeriod);
+
+            if (currentView.type === 'user' && currentView.apiKey) {
+                params.set('user', currentView.apiKey);
+            } else if (currentView.type === 'anonymous' && currentView.bucket) {
+                params.set('anonymous', currentView.bucket);
+            }
+
+            const newURL = window.location.pathname + '?' + params.toString();
+
+            if (pushState) {
+                window.history.pushState(currentView, '', newURL);
+            } else {
+                window.history.replaceState(currentView, '', newURL);
+            }
+        }
+
+        function showOverview() {
+            currentView = { type: 'overview', apiKey: null, bucket: null, name: null, email: null };
+            updateURL(true);
+            loadData();
         }
 
         // Update period button styles
@@ -362,17 +461,79 @@ function getHtmlDashboard(): string {
             hideError();
 
             try {
-                const [usersData, anonymousData, timelineData] = await Promise.all([
-                    fetch(\`/api/top-users?period=\${currentPeriod}\`).then(r => r.json()),
-                    fetch(\`/api/top-anonymous?period=\${currentPeriod}\`).then(r => r.json()),
-                    fetch(\`/api/usage-timeline?period=\${currentPeriod}\`).then(r => r.json())
-                ]);
+                if (currentView.type === 'overview') {
+                    // Load overview data
+                    const [usersData, anonymousData, timelineData] = await Promise.all([
+                        fetch(\`/api/top-users?period=\${currentPeriod}\`).then(r => r.json()),
+                        fetch(\`/api/top-anonymous?period=\${currentPeriod}\`).then(r => r.json()),
+                        fetch(\`/api/usage-timeline?period=\${currentPeriod}\`).then(r => r.json())
+                    ]);
 
-                renderTopUsers(usersData.data);
-                renderTopAnonymous(anonymousData.data);
-                renderTimeline(timelineData.data);
+                    // Update UI for overview
+                    userContext.classList.add('hidden');
+                    statusBreakdown.classList.add('hidden');
+                    mainView.classList.remove('hidden');
+                    document.getElementById('timelineTitle').textContent = 'Usage Timeline';
+
+                    // Render data
+                    renderTopUsers(usersData.data);
+                    renderTopAnonymous(anonymousData.data);
+                    renderOverviewTimeline(timelineData.data);
+
+                } else if (currentView.type === 'user') {
+                    // Load user-specific data
+                    const [timelineResponse, statusResponse, usersData] = await Promise.all([
+                        fetch(\`/api/user-timeline?apiKey=\${encodeURIComponent(currentView.apiKey)}&period=\${currentPeriod}\`).then(r => r.json()),
+                        fetch(\`/api/user-status-breakdown?apiKey=\${encodeURIComponent(currentView.apiKey)}&period=\${currentPeriod}\`).then(r => r.json()),
+                        fetch(\`/api/top-users?period=\${currentPeriod}\`).then(r => r.json())
+                    ]);
+
+                    // If we don't have name/email yet, get it from the users list
+                    if (!currentView.name) {
+                        const user = usersData.data.find(u => u.apiKey === currentView.apiKey);
+                        if (user) {
+                            currentView.name = user.name || 'Unknown';
+                            currentView.email = user.email || '';
+                        }
+                    }
+
+                    // Update UI for user view
+                    userContext.classList.remove('hidden');
+                    statusBreakdown.classList.remove('hidden');
+                    mainView.classList.add('hidden');
+                    document.getElementById('contextUserName').textContent = currentView.name || 'Unknown User';
+                    document.getElementById('contextUserEmail').textContent = currentView.email || currentView.apiKey;
+                    document.getElementById('timelineTitle').textContent = 'Request Timeline by Status Code';
+
+                    // Render data
+                    renderUserTimeline(timelineResponse.data);
+                    renderStatusChart(statusResponse.data);
+                    renderStatusTable(statusResponse.data);
+
+                } else if (currentView.type === 'anonymous') {
+                    // Load anonymous bucket data
+                    const [timelineResponse, statusResponse] = await Promise.all([
+                        fetch(\`/api/anonymous-timeline?bucket=\${encodeURIComponent(currentView.bucket)}&period=\${currentPeriod}\`).then(r => r.json()),
+                        fetch(\`/api/anonymous-status-breakdown?bucket=\${encodeURIComponent(currentView.bucket)}&period=\${currentPeriod}\`).then(r => r.json())
+                    ]);
+
+                    // Update UI for anonymous view
+                    userContext.classList.remove('hidden');
+                    statusBreakdown.classList.remove('hidden');
+                    mainView.classList.add('hidden');
+                    document.getElementById('contextUserName').textContent = currentView.bucket;
+                    document.getElementById('contextUserEmail').textContent = 'Anonymous User Group';
+                    document.getElementById('timelineTitle').textContent = 'Request Timeline by Status Code';
+
+                    // Render data
+                    renderUserTimeline(timelineResponse.data);
+                    renderStatusChart(statusResponse.data);
+                    renderStatusTable(statusResponse.data);
+                }
 
                 lastUpdated.textContent = \`Last updated: \${new Date().toLocaleTimeString()}\`;
+                updateURL(false); // Update URL without pushing to history
+
             } catch (err) {
                 showError('Failed to load analytics data. Please try again.');
                 console.error('Error loading data:', err);
@@ -441,8 +602,8 @@ function getHtmlDashboard(): string {
             \`).join('');
         }
 
-        // Render timeline chart
-        function renderTimeline(data) {
+        // Render overview timeline chart (aggregate)
+        function renderOverviewTimeline(data) {
             const ctx = document.getElementById('timelineChart');
 
             if (timelineChart) {
@@ -488,6 +649,90 @@ function getHtmlDashboard(): string {
             });
         }
 
+        // Render user timeline with status codes overlaid
+        function renderUserTimeline(data) {
+            const ctx = document.getElementById('timelineChart');
+
+            if (timelineChart) {
+                timelineChart.destroy();
+            }
+
+            // Group data by status code
+            const statusCodes = [...new Set(data.map(d => d.statusCode))].sort((a, b) => a - b);
+            const timestamps = [...new Set(data.map(d => d.timestamp))].sort();
+
+            // Create datasets for each status code
+            const datasets = statusCodes.map(statusCode => {
+                const color = getStatusCodeColor(statusCode);
+                const dataPoints = timestamps.map(timestamp => {
+                    const point = data.find(d => d.timestamp === timestamp && d.statusCode === statusCode);
+                    return point ? point.requestCount : 0;
+                });
+
+                return {
+                    label: \`\${statusCode} - \${getStatusCodeLabel(statusCode)}\`,
+                    data: dataPoints,
+                    borderColor: color.border,
+                    backgroundColor: color.bg,
+                    fill: true,
+                    tension: 0.4,
+                    borderWidth: 2
+                };
+            });
+
+            const labels = timestamps.map(ts => new Date(ts).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit'
+            }));
+
+            timelineChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                boxWidth: 15,
+                                font: { size: 11 },
+                                usePointStyle: true
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.dataset.label || '';
+                                    const value = context.parsed.y || 0;
+                                    return \`\${label}: \${value.toLocaleString()} requests\`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            stacked: false
+                        },
+                        y: {
+                            stacked: false,
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         // UI helpers
         function showLoading(show) {
             loading.classList.toggle('hidden', !show);
@@ -505,32 +750,10 @@ function getHtmlDashboard(): string {
 
         // Status breakdown functionality
         let statusChart = null;
-        let mainView = null;
-        let breakdownView = null;
-        let backButton = null;
 
-        // Initialize after DOM is ready
-        function initBreakdown() {
-            console.log('Initializing breakdown functionality...');
-
-            mainView = document.getElementById('mainView');
-            breakdownView = document.getElementById('breakdownView');
-            backButton = document.getElementById('backButton');
-
-            console.log('Elements found:', { mainView, breakdownView, backButton });
-
-            // Back button handler
-            if (backButton) {
-                backButton.addEventListener('click', () => {
-                    console.log('Back button clicked');
-                    if (breakdownView) breakdownView.classList.add('hidden');
-                    if (mainView) mainView.classList.remove('hidden');
-                    if (statusChart) {
-                        statusChart.destroy();
-                        statusChart = null;
-                    }
-                });
-            }
+        // Initialize row click handlers after DOM is ready
+        function initRowClickHandlers() {
+            console.log('Initializing row click handlers...');
 
             // Event delegation for table row clicks
             const usersTable = document.getElementById('topUsersTable');
@@ -541,10 +764,15 @@ function getHtmlDashboard(): string {
                     const row = e.target.closest('tr.clickable-row');
                     if (row && row.dataset.type === 'user') {
                         console.log('User row clicked:', row.dataset);
-                        const apiKey = row.dataset.apikey;
-                        const name = row.dataset.name;
-                        const email = row.dataset.email;
-                        showUserBreakdown(apiKey, name, email);
+                        currentView = {
+                            type: 'user',
+                            apiKey: row.dataset.apikey,
+                            bucket: null,
+                            name: row.dataset.name,
+                            email: row.dataset.email
+                        };
+                        updateURL(true); // Push to history
+                        loadData();
                     }
                 });
             }
@@ -554,15 +782,22 @@ function getHtmlDashboard(): string {
                     const row = e.target.closest('tr.clickable-row');
                     if (row && row.dataset.type === 'anonymous') {
                         console.log('Anonymous row clicked:', row.dataset);
-                        const bucket = row.dataset.bucket;
-                        showAnonymousBreakdown(bucket);
+                        currentView = {
+                            type: 'anonymous',
+                            apiKey: null,
+                            bucket: row.dataset.bucket,
+                            name: row.dataset.bucket,
+                            email: 'Anonymous User Group'
+                        };
+                        updateURL(true); // Push to history
+                        loadData();
                     }
                 });
             }
         }
 
         // Call after DOM loads
-        setTimeout(initBreakdown, 100);
+        setTimeout(initRowClickHandlers, 100);
 
         function getStatusCodeColor(code) {
             if (code >= 200 && code < 300) return { bg: 'rgba(34, 197, 94, 0.8)', border: 'rgb(34, 197, 94)' };
@@ -580,62 +815,6 @@ function getHtmlDashboard(): string {
                 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable'
             };
             return labels[code] || 'Unknown';
-        }
-
-        async function showUserBreakdown(apiKey, userName, userEmail) {
-            mainView.classList.add('hidden');
-            breakdownView.classList.remove('hidden');
-
-            document.getElementById('breakdownUserName').textContent = userName;
-            document.getElementById('breakdownUserEmail').textContent = userEmail;
-
-            showLoading(true);
-
-            try {
-                const response = await fetch(\`/api/user-status-breakdown?apiKey=\${encodeURIComponent(apiKey)}&period=\${currentPeriod}\`);
-                const result = await response.json();
-
-                if (!result.data || result.data.length === 0) {
-                    document.getElementById('statusTableContainer').innerHTML = '<p class="text-gray-500 text-center py-4">No status data available</p>';
-                    return;
-                }
-
-                renderStatusChart(result.data);
-                renderStatusTable(result.data);
-            } catch (err) {
-                showError('Failed to load status breakdown');
-                console.error('Error loading status breakdown:', err);
-            } finally {
-                showLoading(false);
-            }
-        }
-
-        async function showAnonymousBreakdown(bucket) {
-            mainView.classList.add('hidden');
-            breakdownView.classList.remove('hidden');
-
-            document.getElementById('breakdownUserName').textContent = bucket;
-            document.getElementById('breakdownUserEmail').textContent = 'Anonymous User Group';
-
-            showLoading(true);
-
-            try {
-                const response = await fetch(\`/api/anonymous-status-breakdown?bucket=\${encodeURIComponent(bucket)}&period=\${currentPeriod}\`);
-                const result = await response.json();
-
-                if (!result.data || result.data.length === 0) {
-                    document.getElementById('statusTableContainer').innerHTML = '<p class="text-gray-500 text-center py-4">No status data available</p>';
-                    return;
-                }
-
-                renderStatusChart(result.data);
-                renderStatusTable(result.data);
-            } catch (err) {
-                showError('Failed to load status breakdown');
-                console.error('Error loading status breakdown:', err);
-            } finally {
-                showLoading(false);
-            }
         }
 
         function renderStatusChart(data) {
