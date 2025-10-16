@@ -169,26 +169,49 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
                 // Check cache first
                 const cached = getCachedIpInfo(ip);
                 if (cached) {
-                    console.log('IP info cache hit for:', ip);
                     return jsonResponse(cached, 200, corsHeaders);
                 }
 
                 // Use ip-api.com for geolocation (free, no API key needed, 45 req/min limit)
                 const ipApiUrl = `http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query`;
                 const ipApiResponse = await fetch(ipApiUrl);
-                const ipData = await ipApiResponse.json();
 
-                if (ipData.status === 'fail') {
-                    return jsonResponse({ error: ipData.message || 'Failed to lookup IP' }, 400, corsHeaders);
+                // Check if response is OK
+                if (!ipApiResponse.ok) {
+                    // Return minimal info with just the IP
+                    const fallback = { query: ip, status: 'fail', message: 'Rate limited or unavailable' };
+                    setCachedIpInfo(ip, fallback);
+                    return jsonResponse(fallback, 200, corsHeaders);
                 }
 
-                // Cache the result
+                const responseText = await ipApiResponse.text();
+
+                // Try to parse JSON, handle rate limiting
+                let ipData;
+                try {
+                    ipData = JSON.parse(responseText);
+                } catch (parseError) {
+                    // Return minimal info with just the IP
+                    const fallback = { query: ip, status: 'fail', message: 'Invalid response' };
+                    setCachedIpInfo(ip, fallback);
+                    return jsonResponse(fallback, 200, corsHeaders);
+                }
+
+                if (ipData.status === 'fail') {
+                    // Still cache the failure to avoid repeated requests
+                    setCachedIpInfo(ip, ipData);
+                    return jsonResponse(ipData, 200, corsHeaders);
+                }
+
+                // Cache the successful result
                 setCachedIpInfo(ip, ipData);
 
                 return jsonResponse(ipData, 200, corsHeaders);
             } catch (error) {
                 console.error('Error looking up IP:', error);
-                return jsonResponse({ error: 'Failed to lookup IP information' }, 500, corsHeaders);
+                // Return minimal info instead of error
+                const fallback = { query: ip, status: 'fail', message: 'Lookup failed' };
+                return jsonResponse(fallback, 200, corsHeaders);
             }
         }
 
@@ -331,10 +354,10 @@ function getHtmlDashboard(): string {
             </div>
         </div>
 
-        <!-- Usage Timeline Chart -->
+        <!-- Usage Chart -->
         <div class="glass rounded-lg shadow-xl p-6 mb-6">
             <div class="flex justify-between items-center mb-4">
-                <h2 class="text-xl font-bold text-gray-800" id="timelineTitle">Usage Timeline</h2>
+                <h2 class="text-xl font-bold text-gray-800" id="timelineTitle">Usage</h2>
                 <div id="chartLoading" class="hidden">
                     <div class="spinner" style="width: 20px; height: 20px; border-width: 2px;"></div>
                 </div>
@@ -348,7 +371,7 @@ function getHtmlDashboard(): string {
         <div id="mainView" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <!-- Top Authenticated Users -->
             <div class="glass rounded-lg shadow-xl p-6">
-                <h2 class="text-xl font-bold text-gray-800 mb-4">Top API Users</h2>
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Top API Key Users</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead>
@@ -624,7 +647,7 @@ function getHtmlDashboard(): string {
                             const ipInfoResponse = await fetch('/api/ip-info?ip=' + encodeURIComponent(topIpResponse.ipAddress));
                             ipInfo = await ipInfoResponse.json();
                         } catch (err) {
-                            console.warn('Failed to lookup IP info:', err);
+                            // Failed to lookup IP info
                         }
                     }
 
@@ -716,70 +739,20 @@ function getHtmlDashboard(): string {
                 return;
             }
 
-            // Show loading state
-            tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-500">Loading IP information...</td></tr>';
-
-            // Fetch top IP and enrich with geo data
-            const enrichedUsers = await Promise.all(users.map(async (user) => {
-                try {
-                    // Get top IP for this bucket
-                    const topIpRes = await fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(user.bucket) + '&period=' + period);
-                    const topIpData = await topIpRes.json();
-
-                    if (topIpData.ipAddress) {
-                        // Get IP info
-                        const ipInfoRes = await fetch('/api/ip-info?ip=' + encodeURIComponent(topIpData.ipAddress));
-                        const ipInfo = await ipInfoRes.json();
-
-                        return {
-                            ...user,
-                            topIp: topIpData.ipAddress,
-                            ipInfo: ipInfo
-                        };
-                    }
-                } catch (err) {
-                    console.warn('Failed to enrich user:', user.bucket, err);
-                }
-
-                return {
-                    ...user,
-                    topIp: user.ipSample,
-                    ipInfo: null
-                };
-            }));
-
-            // Render with enriched data
-            tbody.innerHTML = enrichedUsers.map((user, index) => {
-                let displayName = user.bucket;
-                let displayDetails = 'Multiple IPs';
-
-                if (user.ipInfo && user.ipInfo.query) {
-                    displayName = user.ipInfo.query;
-                    const locationParts = [];
-                    if (user.ipInfo.city) locationParts.push(user.ipInfo.city);
-                    if (user.ipInfo.country) locationParts.push(user.ipInfo.country);
-                    const location = locationParts.join(', ');
-                    const org = user.ipInfo.org || user.ipInfo.isp;
-
-                    if (org && location) {
-                        displayDetails = org + ' • ' + location;
-                    } else if (org) {
-                        displayDetails = org;
-                    } else if (location) {
-                        displayDetails = location;
-                    }
-                } else if (user.topIp) {
-                    displayName = user.topIp;
-                }
+            // Render table immediately with IP addresses if available
+            tbody.innerHTML = users.map((user, index) => {
+                // Show IP sample if available, otherwise bucket name
+                const initialName = user.ipSample || user.bucket;
+                const initialDetails = 'Loading...';
 
                 return \`
                     <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
                         data-type="anonymous"
                         data-bucket="\${user.bucket}">
                         <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
-                        <td class="py-2 px-2">
-                            <div class="font-medium text-gray-800">\${displayName}</div>
-                            <div class="text-xs text-gray-500">\${displayDetails}</div>
+                        <td class="py-2 px-2" id="anon-name-\${index}">
+                            <div class="font-medium text-gray-800">\${initialName}</div>
+                            <div class="text-xs text-gray-500">\${initialDetails}</div>
                         </td>
                         <td class="py-2 px-2 text-right font-semibold text-gray-800">\${user.requestCount.toLocaleString()}</td>
                         <td class="py-2 px-2 text-right text-indigo-600 font-medium">\${user.requestsPerSecond.toFixed(2)}</td>
@@ -792,6 +765,87 @@ function getHtmlDashboard(): string {
                     </tr>
                 \`;
             }).join('');
+
+            // Enrich with IP data in background, update cells as data comes in
+            users.forEach(async (user, index) => {
+                try {
+                    // Get top IP for this bucket
+                    const topIpRes = await fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(user.bucket) + '&period=' + period);
+                    const topIpData = await topIpRes.json();
+
+                    let displayName = user.bucket;
+                    let displayDetails = 'Multiple IPs';
+                    let foundIp = null;
+
+                    // Priority 1: Top IP from query
+                    if (topIpData.ipAddress) {
+                        foundIp = topIpData.ipAddress;
+                        displayName = foundIp;
+                        displayDetails = 'Top IP in bucket';
+                    }
+                    // Priority 2: IP sample from initial query
+                    else if (user.ipSample) {
+                        foundIp = user.ipSample;
+                        displayName = foundIp;
+                        displayDetails = 'Sample IP';
+                    }
+
+                    // If we have an IP, try to get geolocation
+                    if (foundIp) {
+                        try {
+                            const ipInfoRes = await fetch('/api/ip-info?ip=' + encodeURIComponent(foundIp));
+                            const ipInfo = await ipInfoRes.json();
+
+                            if (ipInfo && ipInfo.status !== 'fail') {
+                                // Use the IP from geolocation response (more reliable)
+                                if (ipInfo.query) {
+                                    displayName = ipInfo.query;
+                                }
+
+                                const locationParts = [];
+                                if (ipInfo.city) locationParts.push(ipInfo.city);
+                                if (ipInfo.country) locationParts.push(ipInfo.country);
+                                const location = locationParts.join(', ');
+                                const org = ipInfo.org || ipInfo.isp;
+
+                                if (org && location) {
+                                    displayDetails = org + ' • ' + location;
+                                } else if (org) {
+                                    displayDetails = org;
+                                } else if (location) {
+                                    displayDetails = location;
+                                } else {
+                                    displayDetails = 'IP address';
+                                }
+                            }
+                        } catch (ipErr) {
+                            // Keep the IP as displayName, just show basic details
+                            displayDetails = 'IP address';
+                        }
+                    }
+
+                    // Update only the name cell content
+                    const nameCell = document.getElementById('anon-name-' + index);
+                    if (nameCell) {
+                        nameCell.innerHTML = \`
+                            <div class="font-medium text-gray-800">\${displayName}</div>
+                            <div class="text-xs text-gray-500">\${displayDetails}</div>
+                        \`;
+                    }
+                } catch (err) {
+                    // Show bucket name on error
+                    const nameCell = document.getElementById('anon-name-' + index);
+                    if (nameCell) {
+                        // Try to at least show ipSample if we have it
+                        const fallbackName = user.ipSample || user.bucket;
+                        const fallbackDetails = user.ipSample ? 'IP address' : 'Multiple IPs';
+                        nameCell.innerHTML = \`
+                            <div class="font-medium text-gray-800">\${fallbackName}</div>
+                            <div class="text-xs text-gray-500">\${fallbackDetails}</div>
+                        \`;
+                    }
+                }
+            });
         }
 
         // Render overview timeline chart (aggregate)
@@ -944,8 +998,6 @@ function getHtmlDashboard(): string {
 
         // Initialize row click handlers after DOM is ready
         function initRowClickHandlers() {
-            console.log('Initializing row click handlers...');
-
             // Event delegation for table row clicks
             const usersTable = document.getElementById('topUsersTable');
             const anonymousTable = document.getElementById('topAnonymousTable');
@@ -954,7 +1006,6 @@ function getHtmlDashboard(): string {
                 usersTable.addEventListener('click', (e) => {
                     const row = e.target.closest('tr.clickable-row');
                     if (row && row.dataset.type === 'user') {
-                        console.log('User row clicked:', row.dataset);
                         currentView = {
                             type: 'user',
                             apiKey: row.dataset.apikey,
@@ -972,7 +1023,6 @@ function getHtmlDashboard(): string {
                 anonymousTable.addEventListener('click', (e) => {
                     const row = e.target.closest('tr.clickable-row');
                     if (row && row.dataset.type === 'anonymous') {
-                        console.log('Anonymous row clicked:', row.dataset);
                         currentView = {
                             type: 'anonymous',
                             apiKey: null,

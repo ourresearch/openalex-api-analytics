@@ -18,8 +18,6 @@ interface AnalyticsEngineResponse {
 async function executeQuery(env: Env, query: string): Promise<any[]> {
     const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${env.ACCOUNT_ID}/analytics_engine/sql`;
 
-    console.log('Executing query:', query);
-
     const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -34,22 +32,6 @@ async function executeQuery(env: Env, query: string): Promise<any[]> {
     }
 
     const result: AnalyticsEngineResponse = await response.json();
-    console.log('\n--- Query Results ---');
-    console.log('Rows returned:', result.data?.length || 0);
-    if (result.data && result.data.length > 0) {
-        console.log('First row sample:', JSON.stringify(result.data[0]).substring(0, 200));
-
-        // Check if data has timestamp field to verify time filtering
-        if ('timestamp' in result.data[0]) {
-            const timestamps = result.data.map((r: any) => r.timestamp).filter(Boolean);
-            if (timestamps.length > 0) {
-                console.log('Time range in results:');
-                console.log('  Oldest:', timestamps[0]);
-                console.log('  Newest:', timestamps[timestamps.length - 1]);
-            }
-        }
-    }
-    console.log('--- End Results ---\n');
     return result.data || [];
 }
 
@@ -87,29 +69,6 @@ export async function getTopUsers(env: Env, period: Period = 'hour', limit: numb
     try {
         const results = await executeQuery(env, query);
 
-        // Enhanced debug logging
-        console.log('=== Top Users Query Debug ===');
-        console.log('Total rows returned:', results.length);
-        console.log('Unique API keys:', new Set(results.map(r => r.apiKey)).size);
-
-        if (results.length > 0) {
-            const sampleIntervals = results.slice(0, 10).map(r => r.requestCount);
-            console.log('Sample request counts (first 10):', sampleIntervals);
-            console.log('Max request count in results:', Math.max(...results.map(r => r.requestCount)));
-
-            console.log('\nFirst 3 raw results:');
-            results.slice(0, 3).forEach((r, i) => {
-                console.log(`  [${i}]`, {
-                    apiKey: r.apiKey?.substring(0, 30) + '...',
-                    statusCode: r.statusCode,
-                    requestCount: r.requestCount,
-                    avgResponseTime: r.avgResponseTime,
-                    successCount: r.successCount
-                });
-            });
-        }
-        console.log('=== End Debug ===\n');
-
         // Aggregate by user
         const userMap = new Map<string, {
             totalRequests: number;
@@ -142,17 +101,6 @@ export async function getTopUsers(env: Env, period: Period = 'hour', limit: numb
         const sortedUsers = Array.from(userMap.entries())
             .sort((a, b) => b[1].totalRequests - a[1].totalRequests)
             .slice(0, limit);
-
-        console.log('After JavaScript aggregation:');
-        console.log('Unique users after aggregation:', sortedUsers.length);
-        if (sortedUsers.length > 0) {
-            console.log('Top user request count:', sortedUsers[0][1].totalRequests);
-            console.log('Top 3 users (before D1 lookup):', sortedUsers.slice(0, 3).map(([key, stats]) => ({
-                apiKey: key.substring(0, 30) + '...',
-                totalRequests: stats.totalRequests,
-                successfulRequests: stats.successfulRequests
-            })));
-        }
 
         // Get user information from D1 for each API key
         const topUsers: TopUser[] = [];
@@ -507,13 +455,14 @@ export async function getSampleUrlsForUser(env: Env, apiKey: string, period: Per
     const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
 
     const query = `
-        SELECT DISTINCT
+        SELECT
             blob3 as url
         FROM ${env.ANALYTICS_DATASET}
         WHERE
             timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
             AND blob1 = '${apiKey}'
             AND blob3 != ''
+        GROUP BY blob3
         LIMIT ${limit}
     `;
 
@@ -545,7 +494,7 @@ export async function getSampleUrlsForBucket(env: Env, bucket: string, period: P
     const prefixEnd = `anon_${nextBucketNum}_`;
 
     const query = `
-        SELECT DISTINCT
+        SELECT
             blob3 as url
         FROM ${env.ANALYTICS_DATASET}
         WHERE
@@ -554,6 +503,7 @@ export async function getSampleUrlsForBucket(env: Env, bucket: string, period: P
             AND index1 >= '${prefix}'
             AND index1 < '${prefixEnd}'
             AND blob3 != ''
+        GROUP BY blob3
         LIMIT ${limit}
     `;
 
