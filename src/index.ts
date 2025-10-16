@@ -1,5 +1,5 @@
 import type { Env, Period, TopUsersResponse, TopAnonymousResponse, TimelineResponse } from './types';
-import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown, getUserTimeline, getAnonymousTimeline } from './queries';
+import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown, getUserTimeline, getAnonymousTimeline, getTopIpInBucket, getSampleUrlsForUser, getSampleUrlsForBucket } from './queries';
 
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -126,6 +126,72 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
             return jsonResponse({ period, data, timestamp: new Date().toISOString() }, 200, corsHeaders);
         }
 
+        // Route: Get top IP in anonymous bucket
+        if (url.pathname === '/api/top-ip-in-bucket') {
+            const bucket = url.searchParams.get('bucket');
+            if (!bucket) {
+                return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
+            }
+            const ipAddress = await getTopIpInBucket(env, bucket, period);
+            return jsonResponse({ bucket, ipAddress, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get sample URLs for user
+        if (url.pathname === '/api/sample-urls-user') {
+            const apiKey = url.searchParams.get('apiKey');
+            if (!apiKey) {
+                return jsonResponse({ error: 'apiKey parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const urls = await getSampleUrlsForUser(env, apiKey, period, limit);
+            return jsonResponse({ urls, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get sample URLs for anonymous bucket
+        if (url.pathname === '/api/sample-urls-bucket') {
+            const bucket = url.searchParams.get('bucket');
+            if (!bucket) {
+                return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const urls = await getSampleUrlsForBucket(env, bucket, period, limit);
+            return jsonResponse({ urls, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get IP geolocation info
+        if (url.pathname === '/api/ip-info') {
+            const ip = url.searchParams.get('ip');
+            if (!ip) {
+                return jsonResponse({ error: 'ip parameter is required' }, 400, corsHeaders);
+            }
+
+            try {
+                // Check cache first
+                const cached = getCachedIpInfo(ip);
+                if (cached) {
+                    console.log('IP info cache hit for:', ip);
+                    return jsonResponse(cached, 200, corsHeaders);
+                }
+
+                // Use ip-api.com for geolocation (free, no API key needed, 45 req/min limit)
+                const ipApiUrl = `http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,query`;
+                const ipApiResponse = await fetch(ipApiUrl);
+                const ipData = await ipApiResponse.json();
+
+                if (ipData.status === 'fail') {
+                    return jsonResponse({ error: ipData.message || 'Failed to lookup IP' }, 400, corsHeaders);
+                }
+
+                // Cache the result
+                setCachedIpInfo(ip, ipData);
+
+                return jsonResponse(ipData, 200, corsHeaders);
+            } catch (error) {
+                console.error('Error looking up IP:', error);
+                return jsonResponse({ error: 'Failed to lookup IP information' }, 500, corsHeaders);
+            }
+        }
+
         return jsonResponse({ error: 'API endpoint not found' }, 404, corsHeaders);
 
     } catch (error) {
@@ -148,6 +214,27 @@ function jsonResponse(data: unknown, status: number = 200, additionalHeaders: Re
             ...additionalHeaders
         }
     });
+}
+
+/**
+ * Simple in-memory cache for IP lookups (valid for current Worker instance)
+ */
+const ipCache = new Map<string, { data: any; timestamp: number }>();
+const IP_CACHE_TTL = 3600000; // 1 hour in milliseconds
+
+function getCachedIpInfo(ip: string): any | null {
+    const cached = ipCache.get(ip);
+    if (cached && Date.now() - cached.timestamp < IP_CACHE_TTL) {
+        return cached.data;
+    }
+    if (cached) {
+        ipCache.delete(ip); // Remove expired entry
+    }
+    return null;
+}
+
+function setCachedIpInfo(ip: string, data: any): void {
+    ipCache.set(ip, { data, timestamp: Date.now() });
 }
 
 /**
@@ -223,12 +310,6 @@ function getHtmlDashboard(): string {
             <div id="lastUpdated" class="text-sm text-gray-500 mt-2"></div>
         </div>
 
-        <!-- Loading Indicator -->
-        <div id="loading" class="hidden flex items-center justify-center py-12">
-            <div class="spinner"></div>
-            <span class="ml-3 text-white font-medium">Loading analytics...</span>
-        </div>
-
         <!-- Error Message -->
         <div id="error" class="hidden glass rounded-lg shadow-xl p-6 mb-6 bg-red-50 border-red-300">
             <p class="text-red-800 font-medium"></p>
@@ -252,8 +333,13 @@ function getHtmlDashboard(): string {
 
         <!-- Usage Timeline Chart -->
         <div class="glass rounded-lg shadow-xl p-6 mb-6">
-            <h2 class="text-xl font-bold text-gray-800 mb-4" id="timelineTitle">Usage Timeline</h2>
-            <div class="relative h-80">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-gray-800" id="timelineTitle">Usage Timeline</h2>
+                <div id="chartLoading" class="hidden">
+                    <div class="spinner" style="width: 20px; height: 20px; border-width: 2px;"></div>
+                </div>
+            </div>
+            <div class="relative h-64">
                 <canvas id="timelineChart"></canvas>
             </div>
         </div>
@@ -310,19 +396,29 @@ function getHtmlDashboard(): string {
         </div>
 
         <!-- Status Breakdown Section (hidden by default) -->
-        <div id="statusBreakdown" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <!-- Status Code Chart -->
-            <div class="glass rounded-lg shadow-xl p-6">
-                <h3 class="text-xl font-bold text-gray-800 mb-4">Status Code Distribution</h3>
-                <div class="relative h-64">
-                    <canvas id="statusChart"></canvas>
+        <div id="statusBreakdown" class="hidden">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                <!-- Status Code Chart -->
+                <div class="glass rounded-lg shadow-xl p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4">Status Code Distribution</h3>
+                    <div class="relative h-64">
+                        <canvas id="statusChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Status Code Table -->
+                <div class="glass rounded-lg shadow-xl p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4">Detailed Breakdown</h3>
+                    <div id="statusTableContainer">
+                        <!-- Will be populated dynamically -->
+                    </div>
                 </div>
             </div>
 
-            <!-- Status Code Table -->
+            <!-- Sample URLs -->
             <div class="glass rounded-lg shadow-xl p-6">
-                <h3 class="text-xl font-bold text-gray-800 mb-4">Detailed Breakdown</h3>
-                <div id="statusTableContainer">
+                <h3 class="text-xl font-bold text-gray-800 mb-4">Sample URLs</h3>
+                <div id="sampleUrlsContainer" class="text-sm">
                     <!-- Will be populated dynamically -->
                 </div>
             </div>
@@ -345,7 +441,7 @@ function getHtmlDashboard(): string {
         const btnHour = document.getElementById('btnHour');
         const btnDay = document.getElementById('btnDay');
         const btnRefresh = document.getElementById('btnRefresh');
-        const loading = document.getElementById('loading');
+        const chartLoading = document.getElementById('chartLoading');
         const error = document.getElementById('error');
         const lastUpdated = document.getElementById('lastUpdated');
         const userContext = document.getElementById('userContext');
@@ -464,9 +560,9 @@ function getHtmlDashboard(): string {
                 if (currentView.type === 'overview') {
                     // Load overview data
                     const [usersData, anonymousData, timelineData] = await Promise.all([
-                        fetch(\`/api/top-users?period=\${currentPeriod}\`).then(r => r.json()),
-                        fetch(\`/api/top-anonymous?period=\${currentPeriod}\`).then(r => r.json()),
-                        fetch(\`/api/usage-timeline?period=\${currentPeriod}\`).then(r => r.json())
+                        fetch('/api/top-users?period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/top-anonymous?period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/usage-timeline?period=' + currentPeriod).then(r => r.json())
                     ]);
 
                     // Update UI for overview
@@ -477,15 +573,16 @@ function getHtmlDashboard(): string {
 
                     // Render data
                     renderTopUsers(usersData.data);
-                    renderTopAnonymous(anonymousData.data);
+                    renderTopAnonymous(anonymousData.data, currentPeriod);
                     renderOverviewTimeline(timelineData.data);
 
                 } else if (currentView.type === 'user') {
                     // Load user-specific data
-                    const [timelineResponse, statusResponse, usersData] = await Promise.all([
-                        fetch(\`/api/user-timeline?apiKey=\${encodeURIComponent(currentView.apiKey)}&period=\${currentPeriod}\`).then(r => r.json()),
-                        fetch(\`/api/user-status-breakdown?apiKey=\${encodeURIComponent(currentView.apiKey)}&period=\${currentPeriod}\`).then(r => r.json()),
-                        fetch(\`/api/top-users?period=\${currentPeriod}\`).then(r => r.json())
+                    const [timelineResponse, statusResponse, usersData, sampleUrlsResponse] = await Promise.all([
+                        fetch('/api/user-timeline?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/user-status-breakdown?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/top-users?period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/sample-urls-user?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
                     ]);
 
                     // If we don't have name/email yet, get it from the users list
@@ -509,29 +606,67 @@ function getHtmlDashboard(): string {
                     renderUserTimeline(timelineResponse.data);
                     renderStatusChart(statusResponse.data);
                     renderStatusTable(statusResponse.data);
+                    renderSampleUrls(sampleUrlsResponse.urls);
 
                 } else if (currentView.type === 'anonymous') {
-                    // Load anonymous bucket data
-                    const [timelineResponse, statusResponse] = await Promise.all([
-                        fetch(\`/api/anonymous-timeline?bucket=\${encodeURIComponent(currentView.bucket)}&period=\${currentPeriod}\`).then(r => r.json()),
-                        fetch(\`/api/anonymous-status-breakdown?bucket=\${encodeURIComponent(currentView.bucket)}&period=\${currentPeriod}\`).then(r => r.json())
+                    // Load anonymous bucket data with IP enrichment
+                    const [timelineResponse, statusResponse, topIpResponse, sampleUrlsResponse] = await Promise.all([
+                        fetch('/api/anonymous-timeline?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/anonymous-status-breakdown?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/sample-urls-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
                     ]);
+
+                    // Get IP geolocation info if we have an IP
+                    let ipInfo = null;
+                    if (topIpResponse.ipAddress) {
+                        try {
+                            const ipInfoResponse = await fetch('/api/ip-info?ip=' + encodeURIComponent(topIpResponse.ipAddress));
+                            ipInfo = await ipInfoResponse.json();
+                        } catch (err) {
+                            console.warn('Failed to lookup IP info:', err);
+                        }
+                    }
+
+                    // Build display name from IP info
+                    let displayName = currentView.bucket;
+                    let displayDetails = 'Anonymous User Group';
+
+                    if (ipInfo && ipInfo.query) {
+                        displayName = ipInfo.query;
+                        const locationParts = [];
+                        if (ipInfo.city) locationParts.push(ipInfo.city);
+                        if (ipInfo.regionName) locationParts.push(ipInfo.regionName);
+                        if (ipInfo.country) locationParts.push(ipInfo.country);
+
+                        const location = locationParts.join(', ');
+                        const org = ipInfo.org || ipInfo.isp;
+
+                        if (org && location) {
+                            displayDetails = org + ' • ' + location;
+                        } else if (org) {
+                            displayDetails = org;
+                        } else if (location) {
+                            displayDetails = location;
+                        }
+                    }
 
                     // Update UI for anonymous view
                     userContext.classList.remove('hidden');
                     statusBreakdown.classList.remove('hidden');
                     mainView.classList.add('hidden');
-                    document.getElementById('contextUserName').textContent = currentView.bucket;
-                    document.getElementById('contextUserEmail').textContent = 'Anonymous User Group';
+                    document.getElementById('contextUserName').textContent = displayName;
+                    document.getElementById('contextUserEmail').textContent = displayDetails;
                     document.getElementById('timelineTitle').textContent = 'Request Timeline by Status Code';
 
                     // Render data
                     renderUserTimeline(timelineResponse.data);
                     renderStatusChart(statusResponse.data);
                     renderStatusTable(statusResponse.data);
+                    renderSampleUrls(sampleUrlsResponse.urls);
                 }
 
-                lastUpdated.textContent = \`Last updated: \${new Date().toLocaleTimeString()}\`;
+                lastUpdated.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
                 updateURL(false); // Update URL without pushing to history
 
             } catch (err) {
@@ -573,33 +708,90 @@ function getHtmlDashboard(): string {
             \`).join('');
         }
 
-        // Render top anonymous users table
-        function renderTopAnonymous(users) {
+        // Render top anonymous users table (with IP enrichment)
+        async function renderTopAnonymous(users, period) {
             const tbody = document.getElementById('topAnonymousTable');
             if (!users || users.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-500">No data available</td></tr>';
                 return;
             }
 
-            tbody.innerHTML = users.map((user, index) => \`
-                <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
-                    data-type="anonymous"
-                    data-bucket="\${user.bucket}">
-                    <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
-                    <td class="py-2 px-2">
-                        <div class="font-medium text-gray-800">\${user.bucket}</div>
-                        <div class="text-xs text-gray-500">\${user.ipSample || 'Multiple IPs'}</div>
-                    </td>
-                    <td class="py-2 px-2 text-right font-semibold text-gray-800">\${user.requestCount.toLocaleString()}</td>
-                    <td class="py-2 px-2 text-right text-indigo-600 font-medium">\${user.requestsPerSecond.toFixed(2)}</td>
-                    <td class="py-2 px-2 text-right text-gray-600">\${user.avgResponseTime.toFixed(0)}ms</td>
-                    <td class="py-2 px-2 text-right">
-                        <span class="inline-block px-2 py-1 rounded text-xs font-medium \${user.successRate >= 95 ? 'bg-green-100 text-green-800' : user.successRate >= 80 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}">
-                            \${user.successRate.toFixed(1)}%
-                        </span>
-                    </td>
-                </tr>
-            \`).join('');
+            // Show loading state
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-500">Loading IP information...</td></tr>';
+
+            // Fetch top IP and enrich with geo data
+            const enrichedUsers = await Promise.all(users.map(async (user) => {
+                try {
+                    // Get top IP for this bucket
+                    const topIpRes = await fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(user.bucket) + '&period=' + period);
+                    const topIpData = await topIpRes.json();
+
+                    if (topIpData.ipAddress) {
+                        // Get IP info
+                        const ipInfoRes = await fetch('/api/ip-info?ip=' + encodeURIComponent(topIpData.ipAddress));
+                        const ipInfo = await ipInfoRes.json();
+
+                        return {
+                            ...user,
+                            topIp: topIpData.ipAddress,
+                            ipInfo: ipInfo
+                        };
+                    }
+                } catch (err) {
+                    console.warn('Failed to enrich user:', user.bucket, err);
+                }
+
+                return {
+                    ...user,
+                    topIp: user.ipSample,
+                    ipInfo: null
+                };
+            }));
+
+            // Render with enriched data
+            tbody.innerHTML = enrichedUsers.map((user, index) => {
+                let displayName = user.bucket;
+                let displayDetails = 'Multiple IPs';
+
+                if (user.ipInfo && user.ipInfo.query) {
+                    displayName = user.ipInfo.query;
+                    const locationParts = [];
+                    if (user.ipInfo.city) locationParts.push(user.ipInfo.city);
+                    if (user.ipInfo.country) locationParts.push(user.ipInfo.country);
+                    const location = locationParts.join(', ');
+                    const org = user.ipInfo.org || user.ipInfo.isp;
+
+                    if (org && location) {
+                        displayDetails = org + ' • ' + location;
+                    } else if (org) {
+                        displayDetails = org;
+                    } else if (location) {
+                        displayDetails = location;
+                    }
+                } else if (user.topIp) {
+                    displayName = user.topIp;
+                }
+
+                return \`
+                    <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
+                        data-type="anonymous"
+                        data-bucket="\${user.bucket}">
+                        <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
+                        <td class="py-2 px-2">
+                            <div class="font-medium text-gray-800">\${displayName}</div>
+                            <div class="text-xs text-gray-500">\${displayDetails}</div>
+                        </td>
+                        <td class="py-2 px-2 text-right font-semibold text-gray-800">\${user.requestCount.toLocaleString()}</td>
+                        <td class="py-2 px-2 text-right text-indigo-600 font-medium">\${user.requestsPerSecond.toFixed(2)}</td>
+                        <td class="py-2 px-2 text-right text-gray-600">\${user.avgResponseTime.toFixed(0)}ms</td>
+                        <td class="py-2 px-2 text-right">
+                            <span class="inline-block px-2 py-1 rounded text-xs font-medium \${user.successRate >= 95 ? 'bg-green-100 text-green-800' : user.successRate >= 80 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}">
+                                \${user.successRate.toFixed(1)}%
+                            </span>
+                        </td>
+                    </tr>
+                \`;
+            }).join('');
         }
 
         // Render overview timeline chart (aggregate)
@@ -735,8 +927,7 @@ function getHtmlDashboard(): string {
 
         // UI helpers
         function showLoading(show) {
-            loading.classList.toggle('hidden', !show);
-            loading.classList.toggle('flex', show);
+            chartLoading.classList.toggle('hidden', !show);
         }
 
         function showError(message) {
@@ -893,6 +1084,25 @@ function getHtmlDashboard(): string {
                         }).join('')}
                     </tbody>
                 </table>
+            \`;
+        }
+
+        function renderSampleUrls(urls) {
+            const container = document.getElementById('sampleUrlsContainer');
+            if (!urls || urls.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No sample URLs available</p>';
+                return;
+            }
+
+            container.innerHTML = \`
+                <ul class="space-y-2">
+                    \${urls.map(url => \`
+                        <li class="flex items-start gap-2">
+                            <span class="text-gray-400 mt-1">•</span>
+                            <code class="text-xs bg-gray-100 px-2 py-1 rounded flex-1 overflow-x-auto break-all">\${url}</code>
+                        </li>
+                    \`).join('')}
+                </ul>
             \`;
         }
     </script>

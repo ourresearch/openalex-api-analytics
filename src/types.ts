@@ -32,6 +32,7 @@ export interface TopUser {
 export interface TopAnonymousUser {
     bucket: string;
     ipSample: string | null;
+    topIp: string | null;
     requestCount: number;
     requestsPerSecond: number;
     avgResponseTime: number;

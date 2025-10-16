@@ -398,6 +398,50 @@ export async function getUserTimeline(env: Env, apiKey: string, period: Period =
 }
 
 /**
+ * Get the top IP address in an anonymous bucket
+ */
+export async function getTopIpInBucket(env: Env, bucket: string, period: Period = 'hour'): Promise<string | null> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    // Extract bucket number from format "anon_123"
+    const bucketMatch = bucket.match(/^anon_(\d+)$/);
+    if (!bucketMatch) {
+        throw new Error('Invalid bucket format');
+    }
+
+    // Use prefix matching with string comparison
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
+    const query = `
+        SELECT
+            blob2 as ipAddress,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = ''
+            AND index1 >= '${prefix}'
+            AND index1 < '${prefixEnd}'
+            AND blob2 != ''
+        GROUP BY blob2
+        ORDER BY requestCount DESC
+        LIMIT 1
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.length > 0 ? results[0].ipAddress : null;
+    } catch (error) {
+        console.error('Error querying top IP in bucket:', error);
+        throw error;
+    }
+}
+
+/**
  * Get timeline data for a specific anonymous bucket with status code breakdown
  */
 export async function getAnonymousTimeline(env: Env, bucket: string, period: Period = 'hour'): Promise<any[]> {
@@ -451,6 +495,73 @@ export async function getAnonymousTimeline(env: Env, bucket: string, period: Per
         }));
     } catch (error) {
         console.error('Error querying anonymous timeline:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get sample URLs for a specific user
+ */
+export async function getSampleUrlsForUser(env: Env, apiKey: string, period: Period = 'hour', limit: number = 10): Promise<string[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    const query = `
+        SELECT DISTINCT
+            blob3 as url
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = '${apiKey}'
+            AND blob3 != ''
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => r.url);
+    } catch (error) {
+        console.error('Error querying sample URLs:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get sample URLs for an anonymous bucket
+ */
+export async function getSampleUrlsForBucket(env: Env, bucket: string, period: Period = 'hour', limit: number = 10): Promise<string[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    // Extract bucket number from format "anon_123"
+    const bucketMatch = bucket.match(/^anon_(\d+)$/);
+    if (!bucketMatch) {
+        throw new Error('Invalid bucket format');
+    }
+
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
+    const query = `
+        SELECT DISTINCT
+            blob3 as url
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = ''
+            AND index1 >= '${prefix}'
+            AND index1 < '${prefixEnd}'
+            AND blob3 != ''
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => r.url);
+    } catch (error) {
+        console.error('Error querying sample URLs:', error);
         throw error;
     }
 }
