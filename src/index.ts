@@ -391,6 +391,18 @@ function getHtmlDashboard(): string {
                         </tbody>
                     </table>
                 </div>
+                <!-- Pagination Controls -->
+                <div id="usersPagination" class="mt-4 flex items-center justify-between text-sm text-gray-600">
+                    <div id="usersPageInfo"></div>
+                    <div class="flex gap-2">
+                        <button id="usersPrevPage" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                            ← Previous
+                        </button>
+                        <button id="usersNextPage" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                            Next →
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <!-- Top Anonymous Users -->
@@ -401,7 +413,7 @@ function getHtmlDashboard(): string {
                         <thead>
                             <tr class="border-b-2 border-gray-300">
                                 <th class="text-left py-2 px-2 font-semibold text-gray-700">#</th>
-                                <th class="text-left py-2 px-2 font-semibold text-gray-700">Bucket</th>
+                                <th class="text-left py-2 px-2 font-semibold text-gray-700">IP</th>
                                 <th class="text-right py-2 px-2 font-semibold text-gray-700">Requests</th>
                                 <th class="text-right py-2 px-2 font-semibold text-gray-700">RPS</th>
                                 <th class="text-right py-2 px-2 font-semibold text-gray-700">Avg Time</th>
@@ -414,6 +426,18 @@ function getHtmlDashboard(): string {
                             </tr>
                         </tbody>
                     </table>
+                </div>
+                <!-- Pagination Controls -->
+                <div id="anonymousPagination" class="mt-4 flex items-center justify-between text-sm text-gray-600">
+                    <div id="anonymousPageInfo"></div>
+                    <div class="flex gap-2">
+                        <button id="anonymousPrevPage" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                            ← Previous
+                        </button>
+                        <button id="anonymousNextPage" class="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                            Next →
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -459,6 +483,16 @@ function getHtmlDashboard(): string {
             name: null,
             email: null
         };
+
+        // Pagination state
+        let allUsers = [];
+        let allAnonymousUsers = [];
+        let usersPage = 1;
+        let anonymousPage = 1;
+        const pageSize = 10;
+
+        // Cache for enriched anonymous user data
+        const topIpCache = new Map(); // bucket -> { ip, org, location, etc. }
 
         // DOM elements
         const btnHour = document.getElementById('btnHour');
@@ -510,6 +544,37 @@ function getHtmlDashboard(): string {
                     loadData();
                 } else {
                     loadFromURL();
+                }
+            });
+
+            // Pagination event listeners
+            document.getElementById('usersPrevPage').addEventListener('click', () => {
+                if (usersPage > 1) {
+                    usersPage--;
+                    renderTopUsers(allUsers);
+                }
+            });
+
+            document.getElementById('usersNextPage').addEventListener('click', () => {
+                const totalPages = Math.ceil(allUsers.length / pageSize);
+                if (usersPage < totalPages) {
+                    usersPage++;
+                    renderTopUsers(allUsers);
+                }
+            });
+
+            document.getElementById('anonymousPrevPage').addEventListener('click', () => {
+                if (anonymousPage > 1) {
+                    anonymousPage--;
+                    renderTopAnonymous(allAnonymousUsers, currentPeriod);
+                }
+            });
+
+            document.getElementById('anonymousNextPage').addEventListener('click', () => {
+                const totalPages = Math.ceil(allAnonymousUsers.length / pageSize);
+                if (anonymousPage < totalPages) {
+                    anonymousPage++;
+                    renderTopAnonymous(allAnonymousUsers, currentPeriod);
                 }
             });
         }
@@ -581,22 +646,31 @@ function getHtmlDashboard(): string {
 
             try {
                 if (currentView.type === 'overview') {
-                    // Load overview data
+                    // Reset pagination when loading new data
+                    usersPage = 1;
+                    anonymousPage = 1;
+                    topIpCache.clear(); // Clear cache when reloading data
+
+                    // Load overview data (fetch 100 results for pagination)
                     const [usersData, anonymousData, timelineData] = await Promise.all([
-                        fetch('/api/top-users?period=' + currentPeriod).then(r => r.json()),
-                        fetch('/api/top-anonymous?period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/top-users?period=' + currentPeriod + '&limit=100').then(r => r.json()),
+                        fetch('/api/top-anonymous?period=' + currentPeriod + '&limit=100').then(r => r.json()),
                         fetch('/api/usage-timeline?period=' + currentPeriod).then(r => r.json())
                     ]);
+
+                    // Store all data for pagination
+                    allUsers = usersData.data;
+                    allAnonymousUsers = anonymousData.data;
 
                     // Update UI for overview
                     userContext.classList.add('hidden');
                     statusBreakdown.classList.add('hidden');
                     mainView.classList.remove('hidden');
-                    document.getElementById('timelineTitle').textContent = 'Usage Timeline';
+                    document.getElementById('timelineTitle').textContent = 'Usage';
 
-                    // Render data
-                    renderTopUsers(usersData.data);
-                    renderTopAnonymous(anonymousData.data, currentPeriod);
+                    // Render data with pagination
+                    renderTopUsers(allUsers);
+                    renderTopAnonymous(allAnonymousUsers, currentPeriod);
                     renderOverviewTimeline(timelineData.data);
 
                 } else if (currentView.type === 'user') {
@@ -705,16 +779,23 @@ function getHtmlDashboard(): string {
             const tbody = document.getElementById('topUsersTable');
             if (!users || users.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-500">No data available</td></tr>';
+                updateUsersPagination(0, 0);
                 return;
             }
 
-            tbody.innerHTML = users.map((user, index) => \`
+            // Calculate pagination
+            const startIndex = (usersPage - 1) * pageSize;
+            const endIndex = startIndex + pageSize;
+            const paginatedUsers = users.slice(startIndex, endIndex);
+
+            // Render paginated data
+            tbody.innerHTML = paginatedUsers.map((user, index) => \`
                 <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
                     data-type="user"
                     data-apikey="\${user.apiKey}"
                     data-name="\${(user.name || 'Unknown').replace(/"/g, '&quot;')}"
                     data-email="\${(user.email || '').replace(/"/g, '&quot;')}">
-                    <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
+                    <td class="py-2 px-2 text-gray-600">\${startIndex + index + 1}</td>
                     <td class="py-2 px-2">
                         <div class="font-medium text-gray-800">\${user.name || 'Unknown'}</div>
                         <div class="text-xs text-gray-500">\${user.email || user.organization || user.apiKey.substring(0, 12) + '...'}</div>
@@ -729,6 +810,9 @@ function getHtmlDashboard(): string {
                     </td>
                 </tr>
             \`).join('');
+
+            // Update pagination info
+            updateUsersPagination(users.length, startIndex + 1, endIndex);
         }
 
         // Render top anonymous users table (with IP enrichment)
@@ -736,11 +820,17 @@ function getHtmlDashboard(): string {
             const tbody = document.getElementById('topAnonymousTable');
             if (!users || users.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-500">No data available</td></tr>';
+                updateAnonymousPagination(0, 0);
                 return;
             }
 
+            // Calculate pagination
+            const startIndex = (anonymousPage - 1) * pageSize;
+            const endIndex = startIndex + pageSize;
+            const paginatedUsers = users.slice(startIndex, endIndex);
+
             // Render table immediately with IP addresses if available
-            tbody.innerHTML = users.map((user, index) => {
+            tbody.innerHTML = paginatedUsers.map((user, index) => {
                 // Show IP sample if available, otherwise bucket name
                 const initialName = user.ipSample || user.bucket;
                 const initialDetails = 'Loading...';
@@ -749,8 +839,8 @@ function getHtmlDashboard(): string {
                     <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
                         data-type="anonymous"
                         data-bucket="\${user.bucket}">
-                        <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
-                        <td class="py-2 px-2" id="anon-name-\${index}">
+                        <td class="py-2 px-2 text-gray-600">\${startIndex + index + 1}</td>
+                        <td class="py-2 px-2" id="anon-name-\${startIndex + index}">
                             <div class="font-medium text-gray-800">\${initialName}</div>
                             <div class="text-xs text-gray-500">\${initialDetails}</div>
                         </td>
@@ -766,84 +856,111 @@ function getHtmlDashboard(): string {
                 \`;
             }).join('');
 
-            // Enrich with IP data in background, update cells as data comes in
-            users.forEach(async (user, index) => {
-                try {
-                    // Get top IP for this bucket
-                    const topIpRes = await fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(user.bucket) + '&period=' + period);
-                    const topIpData = await topIpRes.json();
+            // Update pagination info
+            updateAnonymousPagination(users.length, startIndex + 1, endIndex);
 
-                    let displayName = user.bucket;
-                    let displayDetails = 'Multiple IPs';
-                    let foundIp = null;
+            // Enrich with IP data in background
+            enrichAnonymousUsers(paginatedUsers, startIndex, period);
+        }
 
-                    // Priority 1: Top IP from query
-                    if (topIpData.ipAddress) {
-                        foundIp = topIpData.ipAddress;
-                        displayName = foundIp;
-                        displayDetails = 'Top IP in bucket';
-                    }
-                    // Priority 2: IP sample from initial query
-                    else if (user.ipSample) {
-                        foundIp = user.ipSample;
-                        displayName = foundIp;
-                        displayDetails = 'Sample IP';
-                    }
+        // Enrich anonymous users with IP and geolocation data (with caching)
+        async function enrichAnonymousUsers(users, startIndex, period) {
+            // Batch fetch top IPs for users not in cache
+            const usersNeedingLookup = users.filter(user => !topIpCache.has(user.bucket));
 
-                    // If we have an IP, try to get geolocation
-                    if (foundIp) {
-                        try {
-                            const ipInfoRes = await fetch('/api/ip-info?ip=' + encodeURIComponent(foundIp));
-                            const ipInfo = await ipInfoRes.json();
+            if (usersNeedingLookup.length > 0) {
+                // Fetch top IPs in parallel
+                await Promise.all(usersNeedingLookup.map(async (user) => {
+                    try {
+                        const topIpRes = await fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(user.bucket) + '&period=' + period);
+                        const topIpData = await topIpRes.json();
 
-                            if (ipInfo && ipInfo.status !== 'fail') {
-                                // Use the IP from geolocation response (more reliable)
-                                if (ipInfo.query) {
-                                    displayName = ipInfo.query;
-                                }
+                        let foundIp = null;
+                        if (topIpData.ipAddress) {
+                            foundIp = topIpData.ipAddress;
+                        } else if (user.ipSample) {
+                            foundIp = user.ipSample;
+                        }
 
-                                const locationParts = [];
-                                if (ipInfo.city) locationParts.push(ipInfo.city);
-                                if (ipInfo.country) locationParts.push(ipInfo.country);
-                                const location = locationParts.join(', ');
-                                const org = ipInfo.org || ipInfo.isp;
+                        if (foundIp) {
+                            // Fetch geolocation
+                            try {
+                                const ipInfoRes = await fetch('/api/ip-info?ip=' + encodeURIComponent(foundIp));
+                                const ipInfo = await ipInfoRes.json();
 
-                                if (org && location) {
-                                    displayDetails = org + ' • ' + location;
-                                } else if (org) {
-                                    displayDetails = org;
-                                } else if (location) {
-                                    displayDetails = location;
-                                } else {
-                                    displayDetails = 'IP address';
-                                }
+                                // Cache the enriched data
+                                topIpCache.set(user.bucket, {
+                                    ip: foundIp,
+                                    ipInfo: ipInfo && ipInfo.status !== 'fail' ? ipInfo : null
+                                });
+                            } catch (ipErr) {
+                                // Cache with just IP, no geo data
+                                topIpCache.set(user.bucket, {
+                                    ip: foundIp,
+                                    ipInfo: null
+                                });
                             }
-                        } catch (ipErr) {
-                            // Keep the IP as displayName, just show basic details
+                        } else {
+                            // No IP found
+                            topIpCache.set(user.bucket, {
+                                ip: null,
+                                ipInfo: null
+                            });
+                        }
+                    } catch (err) {
+                        // Cache empty result to avoid retry
+                        topIpCache.set(user.bucket, {
+                            ip: user.ipSample || null,
+                            ipInfo: null
+                        });
+                    }
+                }));
+            }
+
+            // Update UI with cached data
+            users.forEach((user, index) => {
+                const actualIndex = startIndex + index;
+                const cached = topIpCache.get(user.bucket);
+
+                let displayName = user.bucket;
+                let displayDetails = 'Multiple IPs';
+
+                if (cached && cached.ip) {
+                    displayName = cached.ip;
+
+                    if (cached.ipInfo) {
+                        const ipInfo = cached.ipInfo;
+                        if (ipInfo.query) {
+                            displayName = ipInfo.query;
+                        }
+
+                        const locationParts = [];
+                        if (ipInfo.city) locationParts.push(ipInfo.city);
+                        if (ipInfo.country) locationParts.push(ipInfo.country);
+                        const location = locationParts.join(', ');
+                        const org = ipInfo.org || ipInfo.isp;
+
+                        if (org && location) {
+                            displayDetails = org + ' • ' + location;
+                        } else if (org) {
+                            displayDetails = org;
+                        } else if (location) {
+                            displayDetails = location;
+                        } else {
                             displayDetails = 'IP address';
                         }
+                    } else {
+                        displayDetails = 'IP address';
                     }
+                }
 
-                    // Update only the name cell content
-                    const nameCell = document.getElementById('anon-name-' + index);
-                    if (nameCell) {
-                        nameCell.innerHTML = \`
-                            <div class="font-medium text-gray-800">\${displayName}</div>
-                            <div class="text-xs text-gray-500">\${displayDetails}</div>
-                        \`;
-                    }
-                } catch (err) {
-                    // Show bucket name on error
-                    const nameCell = document.getElementById('anon-name-' + index);
-                    if (nameCell) {
-                        // Try to at least show ipSample if we have it
-                        const fallbackName = user.ipSample || user.bucket;
-                        const fallbackDetails = user.ipSample ? 'IP address' : 'Multiple IPs';
-                        nameCell.innerHTML = \`
-                            <div class="font-medium text-gray-800">\${fallbackName}</div>
-                            <div class="text-xs text-gray-500">\${fallbackDetails}</div>
-                        \`;
-                    }
+                // Update the cell
+                const nameCell = document.getElementById('anon-name-' + actualIndex);
+                if (nameCell) {
+                    nameCell.innerHTML = \`
+                        <div class="font-medium text-gray-800">\${displayName}</div>
+                        <div class="text-xs text-gray-500">\${displayDetails}</div>
+                    \`;
                 }
             });
         }
@@ -1154,6 +1271,47 @@ function getHtmlDashboard(): string {
                     \`).join('')}
                 </ul>
             \`;
+        }
+
+        // Pagination helpers
+        function updateUsersPagination(total, start, end) {
+            const pageInfo = document.getElementById('usersPageInfo');
+            const prevBtn = document.getElementById('usersPrevPage');
+            const nextBtn = document.getElementById('usersNextPage');
+
+            if (total === 0) {
+                pageInfo.textContent = 'No results';
+                prevBtn.disabled = true;
+                nextBtn.disabled = true;
+                return;
+            }
+
+            const actualEnd = Math.min(end, total);
+            pageInfo.textContent = 'Showing ' + start + '-' + actualEnd + ' of ' + total;
+
+            const totalPages = Math.ceil(total / pageSize);
+            prevBtn.disabled = usersPage <= 1;
+            nextBtn.disabled = usersPage >= totalPages;
+        }
+
+        function updateAnonymousPagination(total, start, end) {
+            const pageInfo = document.getElementById('anonymousPageInfo');
+            const prevBtn = document.getElementById('anonymousPrevPage');
+            const nextBtn = document.getElementById('anonymousNextPage');
+
+            if (total === 0) {
+                pageInfo.textContent = 'No results';
+                prevBtn.disabled = true;
+                nextBtn.disabled = true;
+                return;
+            }
+
+            const actualEnd = Math.min(end, total);
+            pageInfo.textContent = 'Showing ' + start + '-' + actualEnd + ' of ' + total;
+
+            const totalPages = Math.ceil(total / pageSize);
+            prevBtn.disabled = anonymousPage <= 1;
+            nextBtn.disabled = anonymousPage >= totalPages;
         }
     </script>
 </body>
