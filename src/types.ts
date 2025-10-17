@@ -4,6 +4,7 @@ export interface Env {
     ACCOUNT_ID: string;
     API_TOKEN: string;
     ANALYTICS_DATASET: string;
+    DASHBOARD_PASSWORD: string;
 }
 
 // API User from D1

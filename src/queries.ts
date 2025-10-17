@@ -566,3 +566,225 @@ export async function getAnonymousStatusBreakdown(env: Env, bucket: string, peri
         throw error;
     }
 }
+
+/**
+ * Get top user agents for a specific user
+ */
+export async function getTopUserAgentsForUser(env: Env, apiKey: string, period: Period = 'hour', limit: number = 10): Promise<{ userAgent: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    const query = `
+        SELECT
+            blob6 as userAgent,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = '${apiKey}'
+            AND blob6 != ''
+        GROUP BY blob6
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            userAgent: r.userAgent,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top user agents:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top referrers for a specific user
+ */
+export async function getTopReferrersForUser(env: Env, apiKey: string, period: Period = 'hour', limit: number = 10): Promise<{ referrer: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    const query = `
+        SELECT
+            blob7 as referrer,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = '${apiKey}'
+            AND blob7 != ''
+        GROUP BY blob7
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            referrer: r.referrer,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top referrers:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top user agents for an anonymous bucket
+ */
+export async function getTopUserAgentsForBucket(env: Env, bucket: string, period: Period = 'hour', limit: number = 10): Promise<{ userAgent: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    // Extract bucket number from format "anon_123"
+    const bucketMatch = bucket.match(/^anon_(\d+)$/);
+    if (!bucketMatch) {
+        throw new Error('Invalid bucket format');
+    }
+
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
+    const query = `
+        SELECT
+            blob6 as userAgent,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = ''
+            AND index1 >= '${prefix}'
+            AND index1 < '${prefixEnd}'
+            AND blob6 != ''
+        GROUP BY blob6
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            userAgent: r.userAgent,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top user agents for bucket:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top referrers for an anonymous bucket
+ */
+export async function getTopReferrersForBucket(env: Env, bucket: string, period: Period = 'hour', limit: number = 10): Promise<{ referrer: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    // Extract bucket number from format "anon_123"
+    const bucketMatch = bucket.match(/^anon_(\d+)$/);
+    if (!bucketMatch) {
+        throw new Error('Invalid bucket format');
+    }
+
+    const bucketNum = parseInt(bucketMatch[1]);
+    const nextBucketNum = bucketNum + 1;
+    const prefix = `anon_${bucketNum}_`;
+    const prefixEnd = `anon_${nextBucketNum}_`;
+
+    const query = `
+        SELECT
+            blob7 as referrer,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob1 = ''
+            AND index1 >= '${prefix}'
+            AND index1 < '${prefixEnd}'
+            AND blob7 != ''
+        GROUP BY blob7
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            referrer: r.referrer,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top referrers for bucket:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top user agents across all requests (aggregate)
+ */
+export async function getTopUserAgentsAggregate(env: Env, period: Period = 'hour', limit: number = 10): Promise<{ userAgent: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    const query = `
+        SELECT
+            blob6 as userAgent,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob6 != ''
+        GROUP BY blob6
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            userAgent: r.userAgent,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top user agents aggregate:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get top referrers across all requests (aggregate)
+ */
+export async function getTopReferrersAggregate(env: Env, period: Period = 'hour', limit: number = 10): Promise<{ referrer: string; requestCount: number }[]> {
+    const interval = period === 'hour' ? '1' : '1';
+    const intervalUnit = period === 'hour' ? 'HOUR' : 'DAY';
+
+    const query = `
+        SELECT
+            blob7 as referrer,
+            SUM(_sample_interval) as requestCount
+        FROM ${env.ANALYTICS_DATASET}
+        WHERE
+            timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
+            AND blob7 != ''
+        GROUP BY blob7
+        ORDER BY requestCount DESC
+        LIMIT ${limit}
+    `;
+
+    try {
+        const results = await executeQuery(env, query);
+        return results.map(r => ({
+            referrer: r.referrer,
+            requestCount: Math.round(Number(r.requestCount))
+        }));
+    } catch (error) {
+        console.error('Error querying top referrers aggregate:', error);
+        throw error;
+    }
+}

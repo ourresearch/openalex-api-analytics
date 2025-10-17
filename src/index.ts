@@ -1,5 +1,5 @@
 import type { Env, Period, TopUsersResponse, TopAnonymousResponse, TimelineResponse } from './types';
-import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown, getUserTimeline, getAnonymousTimeline, getTopIpInBucket, getSampleUrlsForUser, getSampleUrlsForBucket } from './queries';
+import { getTopUsers, getTopAnonymousUsers, getUsageTimeline, getUserStatusBreakdown, getAnonymousStatusBreakdown, getUserTimeline, getAnonymousTimeline, getTopIpInBucket, getSampleUrlsForUser, getSampleUrlsForBucket, getTopUserAgentsForUser, getTopReferrersForUser, getTopUserAgentsForBucket, getTopReferrersForBucket, getTopUserAgentsAggregate, getTopReferrersAggregate } from './queries';
 
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -18,6 +18,12 @@ export default {
                 status: 204,
                 headers: corsHeaders
             });
+        }
+
+        // Check authentication
+        const authResponse = checkAuth(request, env);
+        if (authResponse) {
+            return authResponse;
         }
 
         // Route: API endpoints
@@ -39,6 +45,80 @@ export default {
         return new Response('Not Found', { status: 404 });
     }
 };
+
+/**
+ * Check HTTP Basic Authentication (password-only)
+ * Username can be anything, only password is validated
+ */
+function checkAuth(request: Request, env: Env): Response | null {
+    const authorization = request.headers.get('Authorization');
+
+    if (!authorization) {
+        return new Response('Authentication required', {
+            status: 401,
+            headers: {
+                'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+            }
+        });
+    }
+
+    const [scheme, encoded] = authorization.split(' ');
+
+    if (!scheme || scheme.toLowerCase() !== 'basic') {
+        return new Response('Invalid authentication scheme', {
+            status: 401,
+            headers: {
+                'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+            }
+        });
+    }
+
+    if (!encoded) {
+        return new Response('Invalid authentication credentials', {
+            status: 401,
+            headers: {
+                'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+            }
+        });
+    }
+
+    try {
+        const decoded = atob(encoded);
+        const colonIndex = decoded.indexOf(':');
+
+        if (colonIndex === -1) {
+            return new Response('Invalid authentication format', {
+                status: 401,
+                headers: {
+                    'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+                }
+            });
+        }
+
+        // Extract password (everything after first colon)
+        const password = decoded.substring(colonIndex + 1);
+
+        // Validate password against environment variable
+        if (password !== env.DASHBOARD_PASSWORD) {
+            return new Response('Invalid password', {
+                status: 401,
+                headers: {
+                    'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+                }
+            });
+        }
+
+        // Authentication successful
+        return null;
+    } catch (error) {
+        return new Response('Invalid authentication encoding', {
+            status: 401,
+            headers: {
+                'WWW-Authenticate': 'Basic realm="Analytics Dashboard", charset="UTF-8"'
+            }
+        });
+    }
+}
 
 /**
  * Handle API requests
@@ -156,6 +236,64 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
             const limit = parseInt(url.searchParams.get('limit') || '10', 10);
             const urls = await getSampleUrlsForBucket(env, bucket, period, limit);
             return jsonResponse({ urls, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top user agents for user
+        if (url.pathname === '/api/user-agents-user') {
+            const apiKey = url.searchParams.get('apiKey');
+            if (!apiKey) {
+                return jsonResponse({ error: 'apiKey parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopUserAgentsForUser(env, apiKey, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top referrers for user
+        if (url.pathname === '/api/referrers-user') {
+            const apiKey = url.searchParams.get('apiKey');
+            if (!apiKey) {
+                return jsonResponse({ error: 'apiKey parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopReferrersForUser(env, apiKey, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top user agents for anonymous bucket
+        if (url.pathname === '/api/user-agents-bucket') {
+            const bucket = url.searchParams.get('bucket');
+            if (!bucket) {
+                return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopUserAgentsForBucket(env, bucket, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top referrers for anonymous bucket
+        if (url.pathname === '/api/referrers-bucket') {
+            const bucket = url.searchParams.get('bucket');
+            if (!bucket) {
+                return jsonResponse({ error: 'bucket parameter is required' }, 400, corsHeaders);
+            }
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopReferrersForBucket(env, bucket, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top user agents (aggregate across all requests)
+        if (url.pathname === '/api/user-agents-aggregate') {
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopUserAgentsAggregate(env, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
+        }
+
+        // Route: Get top referrers (aggregate across all requests)
+        if (url.pathname === '/api/referrers-aggregate') {
+            const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+            const data = await getTopReferrersAggregate(env, period, limit);
+            return jsonResponse({ data, timestamp: new Date().toISOString() }, 200, corsHeaders);
         }
 
         // Route: Get IP geolocation info
@@ -310,7 +448,7 @@ function getHtmlDashboard(): string {
     </style>
 </head>
 <body class="p-4 md:p-8">
-    <div class="max-w-7xl mx-auto">
+    <div class="max-w-[88rem] mx-auto">
         <!-- Header -->
         <div class="glass rounded-lg shadow-xl p-6 mb-6">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -368,7 +506,7 @@ function getHtmlDashboard(): string {
         </div>
 
         <!-- Tables Container -->
-        <div id="mainView" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div id="mainView" class="grid grid-cols-1 lg:grid-cols-2 gap-6" style="grid-auto-rows: auto;">
             <!-- Top Authenticated Users -->
             <div class="glass rounded-lg shadow-xl p-6">
                 <h2 class="text-xl font-bold text-gray-800 mb-4">Top API Key Users</h2>
@@ -440,6 +578,22 @@ function getHtmlDashboard(): string {
                     </div>
                 </div>
             </div>
+
+            <!-- Top Referrers (Aggregate) -->
+            <div class="glass rounded-lg shadow-xl p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Top Referrers</h2>
+                <div id="aggregateReferrersContainer" class="text-sm">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
+
+            <!-- Top User Agents (Aggregate) -->
+            <div class="glass rounded-lg shadow-xl p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">Top User Agents</h2>
+                <div id="aggregateUserAgentsContainer" class="text-sm">
+                    <p class="text-gray-500">Loading...</p>
+                </div>
+            </div>
         </div>
 
         <!-- Status Breakdown Section (hidden by default) -->
@@ -463,10 +617,29 @@ function getHtmlDashboard(): string {
             </div>
 
             <!-- Sample URLs -->
-            <div class="glass rounded-lg shadow-xl p-6">
+            <div class="glass rounded-lg shadow-xl p-6 mb-6">
                 <h3 class="text-xl font-bold text-gray-800 mb-4">Sample URLs</h3>
                 <div id="sampleUrlsContainer" class="text-sm">
                     <!-- Will be populated dynamically -->
+                </div>
+            </div>
+
+            <!-- User Agents and Referrers -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Top User Agents -->
+                <div class="glass rounded-lg shadow-xl p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4">Top User Agents</h3>
+                    <div id="userAgentsContainer" class="text-sm">
+                        <!-- Will be populated dynamically -->
+                    </div>
+                </div>
+
+                <!-- Top Referrers -->
+                <div class="glass rounded-lg shadow-xl p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4">Top Referrers</h3>
+                    <div id="referrersContainer" class="text-sm">
+                        <!-- Will be populated dynamically -->
+                    </div>
                 </div>
             </div>
         </div>
@@ -652,10 +825,12 @@ function getHtmlDashboard(): string {
                     topIpCache.clear(); // Clear cache when reloading data
 
                     // Load overview data (fetch 100 results for pagination)
-                    const [usersData, anonymousData, timelineData] = await Promise.all([
+                    const [usersData, anonymousData, timelineData, aggregateUserAgentsData, aggregateReferrersData] = await Promise.all([
                         fetch('/api/top-users?period=' + currentPeriod + '&limit=100').then(r => r.json()),
                         fetch('/api/top-anonymous?period=' + currentPeriod + '&limit=100').then(r => r.json()),
-                        fetch('/api/usage-timeline?period=' + currentPeriod).then(r => r.json())
+                        fetch('/api/usage-timeline?period=' + currentPeriod).then(r => r.json()),
+                        fetch('/api/user-agents-aggregate?period=' + currentPeriod + '&limit=10').then(r => r.json()),
+                        fetch('/api/referrers-aggregate?period=' + currentPeriod + '&limit=10').then(r => r.json())
                     ]);
 
                     // Store all data for pagination
@@ -672,14 +847,18 @@ function getHtmlDashboard(): string {
                     renderTopUsers(allUsers);
                     renderTopAnonymous(allAnonymousUsers, currentPeriod);
                     renderOverviewTimeline(timelineData.data);
+                    renderAggregateUserAgents(aggregateUserAgentsData.data);
+                    renderAggregateReferrers(aggregateReferrersData.data);
 
                 } else if (currentView.type === 'user') {
                     // Load user-specific data
-                    const [timelineResponse, statusResponse, usersData, sampleUrlsResponse] = await Promise.all([
+                    const [timelineResponse, statusResponse, usersData, sampleUrlsResponse, userAgentsResponse, referrersResponse] = await Promise.all([
                         fetch('/api/user-timeline?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod).then(r => r.json()),
                         fetch('/api/user-status-breakdown?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod).then(r => r.json()),
                         fetch('/api/top-users?period=' + currentPeriod).then(r => r.json()),
-                        fetch('/api/sample-urls-user?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
+                        fetch('/api/sample-urls-user?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod + '&limit=10').then(r => r.json()),
+                        fetch('/api/user-agents-user?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod + '&limit=10').then(r => r.json()),
+                        fetch('/api/referrers-user?apiKey=' + encodeURIComponent(currentView.apiKey) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
                     ]);
 
                     // If we don't have name/email yet, get it from the users list
@@ -704,14 +883,18 @@ function getHtmlDashboard(): string {
                     renderStatusChart(statusResponse.data);
                     renderStatusTable(statusResponse.data);
                     renderSampleUrls(sampleUrlsResponse.urls);
+                    renderUserAgents(userAgentsResponse.data);
+                    renderReferrers(referrersResponse.data);
 
                 } else if (currentView.type === 'anonymous') {
                     // Load anonymous bucket data with IP enrichment
-                    const [timelineResponse, statusResponse, topIpResponse, sampleUrlsResponse] = await Promise.all([
+                    const [timelineResponse, statusResponse, topIpResponse, sampleUrlsResponse, userAgentsResponse, referrersResponse] = await Promise.all([
                         fetch('/api/anonymous-timeline?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
                         fetch('/api/anonymous-status-breakdown?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
                         fetch('/api/top-ip-in-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod).then(r => r.json()),
-                        fetch('/api/sample-urls-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
+                        fetch('/api/sample-urls-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod + '&limit=10').then(r => r.json()),
+                        fetch('/api/user-agents-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod + '&limit=10').then(r => r.json()),
+                        fetch('/api/referrers-bucket?bucket=' + encodeURIComponent(currentView.bucket) + '&period=' + currentPeriod + '&limit=10').then(r => r.json())
                     ]);
 
                     // Get IP geolocation info if we have an IP
@@ -761,6 +944,8 @@ function getHtmlDashboard(): string {
                     renderStatusChart(statusResponse.data);
                     renderStatusTable(statusResponse.data);
                     renderSampleUrls(sampleUrlsResponse.urls);
+                    renderUserAgents(userAgentsResponse.data);
+                    renderReferrers(referrersResponse.data);
                 }
 
                 lastUpdated.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
@@ -1270,6 +1455,122 @@ function getHtmlDashboard(): string {
                         </li>
                     \`).join('')}
                 </ul>
+            \`;
+        }
+
+        function renderUserAgents(data) {
+            const container = document.getElementById('userAgentsContainer');
+            if (!data || data.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No user agent data available</p>';
+                return;
+            }
+
+            container.innerHTML = \`
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="border-b border-gray-300">
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">User Agent</th>
+                            <th class="text-right py-2 px-2 font-semibold text-gray-700">Requests</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        \${data.map(item => \`
+                            <tr class="border-b border-gray-200">
+                                <td class="py-2 px-2">
+                                    <div class="truncate max-w-md" title="\${item.userAgent.replace(/"/g, '&quot;')}">\${item.userAgent}</div>
+                                </td>
+                                <td class="py-2 px-2 text-right font-medium text-gray-800">\${item.requestCount.toLocaleString()}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
+            \`;
+        }
+
+        function renderReferrers(data) {
+            const container = document.getElementById('referrersContainer');
+            if (!data || data.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No referrer data available</p>';
+                return;
+            }
+
+            container.innerHTML = \`
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="border-b border-gray-300">
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Referrer</th>
+                            <th class="text-right py-2 px-2 font-semibold text-gray-700">Requests</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        \${data.map(item => \`
+                            <tr class="border-b border-gray-200">
+                                <td class="py-2 px-2">
+                                    <div class="truncate max-w-md" title="\${item.referrer.replace(/"/g, '&quot;')}">\${item.referrer}</div>
+                                </td>
+                                <td class="py-2 px-2 text-right font-medium text-gray-800">\${item.requestCount.toLocaleString()}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
+            \`;
+        }
+
+        function renderAggregateUserAgents(data) {
+            const container = document.getElementById('aggregateUserAgentsContainer');
+            if (!data || data.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No user agent data available</p>';
+                return;
+            }
+
+            container.innerHTML = \`
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="border-b border-gray-300">
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">User Agent</th>
+                            <th class="text-right py-2 px-2 font-semibold text-gray-700">Requests</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        \${data.map(item => \`
+                            <tr class="border-b border-gray-200">
+                                <td class="py-2 px-2">
+                                    <div class="truncate max-w-md" title="\${item.userAgent.replace(/"/g, '&quot;')}">\${item.userAgent}</div>
+                                </td>
+                                <td class="py-2 px-2 text-right font-medium text-gray-800">\${item.requestCount.toLocaleString()}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
+            \`;
+        }
+
+        function renderAggregateReferrers(data) {
+            const container = document.getElementById('aggregateReferrersContainer');
+            if (!data || data.length === 0) {
+                container.innerHTML = '<p class="text-gray-500">No referrer data available</p>';
+                return;
+            }
+
+            container.innerHTML = \`
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="border-b border-gray-300">
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Referrer</th>
+                            <th class="text-right py-2 px-2 font-semibold text-gray-700">Requests</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        \${data.map(item => \`
+                            <tr class="border-b border-gray-200">
+                                <td class="py-2 px-2">
+                                    <div class="truncate max-w-md" title="\${item.referrer.replace(/"/g, '&quot;')}">\${item.referrer}</div>
+                                </td>
+                                <td class="py-2 px-2 text-right font-medium text-gray-800">\${item.requestCount.toLocaleString()}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
             \`;
         }
 
