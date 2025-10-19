@@ -456,13 +456,15 @@ export async function getSampleUrlsForUser(env: Env, apiKey: string, period: Per
 
     const query = `
         SELECT
-            blob3 as url
+            blob3 as url,
+            MAX(timestamp) as last_seen
         FROM ${env.ANALYTICS_DATASET}
         WHERE
             timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
             AND blob1 = '${apiKey}'
             AND blob3 != ''
         GROUP BY blob3
+        ORDER BY last_seen DESC
         LIMIT ${limit}
     `;
 
@@ -495,7 +497,8 @@ export async function getSampleUrlsForBucket(env: Env, bucket: string, period: P
 
     const query = `
         SELECT
-            blob3 as url
+            blob3 as url,
+            MAX(timestamp) as last_seen
         FROM ${env.ANALYTICS_DATASET}
         WHERE
             timestamp > NOW() - INTERVAL '${interval}' ${intervalUnit}
@@ -504,6 +507,7 @@ export async function getSampleUrlsForBucket(env: Env, bucket: string, period: P
             AND index1 < '${prefixEnd}'
             AND blob3 != ''
         GROUP BY blob3
+        ORDER BY last_seen DESC
         LIMIT ${limit}
     `;
 
