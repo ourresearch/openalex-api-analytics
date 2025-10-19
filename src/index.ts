@@ -41,6 +41,16 @@ export default {
             });
         }
 
+        // Route: Serve API Keys page
+        if (url.pathname === '/api-keys' || url.pathname === '/api-keys.html') {
+            return new Response(getApiKeysPage(), {
+                headers: {
+                    'Content-Type': 'text/html;charset=UTF-8',
+                    'Cache-Control': 'no-cache'
+                }
+            });
+        }
+
         // 404 for unknown routes
         return new Response('Not Found', { status: 404 });
     }
@@ -353,6 +363,43 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
             }
         }
 
+        // Route: Get all API keys
+        if (url.pathname === '/api/api-keys') {
+            try {
+                const result = await env.DB
+                    .prepare(`
+                        SELECT
+                            id,
+                            api_key,
+                            email,
+                            name,
+                            organization,
+                            is_academic,
+                            max_per_second,
+                            max_per_day,
+                            premium_domain,
+                            created_at,
+                            expires_at,
+                            credit_card_on_file
+                        FROM api_keys
+                        ORDER BY created_at DESC
+                    `)
+                    .all();
+
+                return jsonResponse({
+                    data: result.results,
+                    count: result.results.length,
+                    timestamp: new Date().toISOString()
+                }, 200, corsHeaders);
+            } catch (error) {
+                console.error('Error fetching API keys:', error);
+                return jsonResponse({
+                    error: 'Failed to fetch API keys',
+                    message: error instanceof Error ? error.message : 'Unknown error'
+                }, 500, corsHeaders);
+            }
+        }
+
         return jsonResponse({ error: 'API endpoint not found' }, 404, corsHeaders);
 
     } catch (error) {
@@ -457,6 +504,9 @@ function getHtmlDashboard(): string {
                     <p class="text-gray-600 mt-1">Real-time usage monitoring and insights</p>
                 </div>
                 <div class="flex gap-2">
+                    <a href="/api-keys" class="px-4 py-2 rounded-lg bg-purple-600 text-white font-medium hover:bg-purple-700 transition">
+                        API Keys
+                    </a>
                     <button id="btnHour" class="px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 transition">
                         Last Hour
                     </button>
@@ -974,7 +1024,20 @@ function getHtmlDashboard(): string {
             const paginatedUsers = users.slice(startIndex, endIndex);
 
             // Render paginated data
-            tbody.innerHTML = paginatedUsers.map((user, index) => \`
+            tbody.innerHTML = paginatedUsers.map((user, index) => {
+                // Build display name: organization - name
+                let displayName = '';
+                if (user.organization && user.name) {
+                    displayName = \`\${user.organization} - \${user.name}\`;
+                } else if (user.organization) {
+                    displayName = user.organization;
+                } else if (user.name) {
+                    displayName = user.name;
+                } else {
+                    displayName = 'Unknown';
+                }
+
+                return \`
                 <tr class="clickable-row border-b border-gray-200 hover:bg-gray-50"
                     data-type="user"
                     data-apikey="\${user.apiKey}"
@@ -982,8 +1045,8 @@ function getHtmlDashboard(): string {
                     data-email="\${(user.email || '').replace(/"/g, '&quot;')}">
                     <td class="py-2 px-2 text-gray-600">\${startIndex + index + 1}</td>
                     <td class="py-2 px-2">
-                        <div class="font-medium text-gray-800">\${user.name || 'Unknown'}</div>
-                        <div class="text-xs text-gray-500">\${user.email || user.organization || user.apiKey.substring(0, 12) + '...'}</div>
+                        <div class="font-medium text-gray-800">\${displayName}</div>
+                        <div class="text-xs text-gray-500">\${user.email || user.apiKey.substring(0, 12) + '...'}</div>
                     </td>
                     <td class="py-2 px-2 text-right font-semibold text-gray-800">\${user.requestCount.toLocaleString()}</td>
                     <td class="py-2 px-2 text-right text-indigo-600 font-medium">\${user.requestsPerSecond.toFixed(2)}</td>
@@ -994,7 +1057,8 @@ function getHtmlDashboard(): string {
                         </span>
                     </td>
                 </tr>
-            \`).join('');
+                \`;
+            }).join('');
 
             // Update pagination info
             updateUsersPagination(users.length, startIndex + 1, endIndex);
@@ -1613,6 +1677,202 @@ function getHtmlDashboard(): string {
             const totalPages = Math.ceil(total / pageSize);
             prevBtn.disabled = anonymousPage <= 1;
             nextBtn.disabled = anonymousPage >= totalPages;
+        }
+    </script>
+</body>
+</html>`;
+}
+
+/**
+ * API Keys Page
+ */
+function getApiKeysPage(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Keys - OpenAlex</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .glass {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .spinner {
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top: 3px solid #667eea;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="max-w-[88rem] mx-auto">
+        <!-- Header -->
+        <div class="glass rounded-lg shadow-xl p-6 mb-6">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">API Keys</h1>
+                    <p class="text-gray-600 mt-1">Manage OpenAlex API keys</p>
+                </div>
+                <div class="flex gap-2">
+                    <a href="/" class="px-4 py-2 rounded-lg bg-gray-600 text-white font-medium hover:bg-gray-700 transition">
+                        Back to Dashboard
+                    </a>
+                    <button id="btnRefresh" class="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 transition">
+                        Refresh
+                    </button>
+                </div>
+            </div>
+            <div id="lastUpdated" class="text-sm text-gray-500 mt-2"></div>
+        </div>
+
+        <!-- Error Message -->
+        <div id="error" class="hidden glass rounded-lg shadow-xl p-6 mb-6 bg-red-50 border-red-300">
+            <p class="text-red-800 font-medium"></p>
+        </div>
+
+        <!-- API Keys Table -->
+        <div class="glass rounded-lg shadow-xl p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-gray-800">All API Keys</h2>
+                <div id="loading" class="hidden">
+                    <div class="spinner" style="width: 20px; height: 20px; border-width: 2px;"></div>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b-2 border-gray-300">
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">#</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">API Key</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Organization</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Name</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Email</th>
+                            <th class="text-center py-2 px-2 font-semibold text-gray-700">Academic</th>
+                            <th class="text-right py-2 px-2 font-semibold text-gray-700">Rate Limit</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Created</th>
+                            <th class="text-left py-2 px-2 font-semibold text-gray-700">Expires</th>
+                        </tr>
+                    </thead>
+                    <tbody id="apiKeysTable">
+                        <tr>
+                            <td colspan="9" class="text-center py-8 text-gray-500">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="summary" class="mt-4 text-sm text-gray-600"></div>
+        </div>
+    </div>
+
+    <script>
+        // DOM elements
+        const btnRefresh = document.getElementById('btnRefresh');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const lastUpdated = document.getElementById('lastUpdated');
+        const apiKeysTable = document.getElementById('apiKeysTable');
+        const summary = document.getElementById('summary');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            setupEventListeners();
+            loadApiKeys();
+        });
+
+        // Event listeners
+        function setupEventListeners() {
+            btnRefresh.addEventListener('click', () => {
+                loadApiKeys();
+            });
+        }
+
+        // Load API keys
+        async function loadApiKeys() {
+            showLoading(true);
+            hideError();
+
+            try {
+                const response = await fetch('/api/api-keys');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch API keys');
+                }
+
+                const result = await response.json();
+                renderApiKeys(result.data);
+                summary.textContent = \`Total: \${result.count} API key\${result.count !== 1 ? 's' : ''}\`;
+                lastUpdated.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+            } catch (err) {
+                showError('Failed to load API keys. Please try again.');
+                console.error('Error loading API keys:', err);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // Render API keys table
+        function renderApiKeys(keys) {
+            if (!keys || keys.length === 0) {
+                apiKeysTable.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500">No API keys found</td></tr>';
+                return;
+            }
+
+            apiKeysTable.innerHTML = keys.map((key, index) => \`
+                <tr class="border-b border-gray-200 hover:bg-gray-50">
+                    <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
+                    <td class="py-2 px-2">
+                        <code class="text-xs bg-gray-100 px-2 py-1 rounded">\${key.api_key || 'N/A'}</code>
+                    </td>
+                    <td class="py-2 px-2 text-gray-800">\${key.organization || 'N/A'}</td>
+                    <td class="py-2 px-2 text-gray-800">\${key.name || 'N/A'}</td>
+                    <td class="py-2 px-2 text-gray-800">\${key.email || 'N/A'}</td>
+                    <td class="py-2 px-2 text-center">
+                        <span class="inline-block px-2 py-1 rounded text-xs font-medium \${key.is_academic ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'}">
+                            \${key.is_academic ? 'Yes' : 'No'}
+                        </span>
+                    </td>
+                    <td class="py-2 px-2 text-right text-gray-800">
+                        <div>\${key.max_per_second || 'N/A'}/s</div>
+                        <div class="text-xs text-gray-500">\${key.max_per_day ? (key.max_per_day.toLocaleString() + '/day') : 'N/A'}</div>
+                    </td>
+                    <td class="py-2 px-2 text-gray-600 text-xs">
+                        \${key.created_at ? new Date(key.created_at).toLocaleString() : 'N/A'}
+                    </td>
+                    <td class="py-2 px-2 text-xs">
+                        \${key.expires_at ?
+                            (\`<span class="text-red-600">\${new Date(key.expires_at).toLocaleString()}</span>\`) :
+                            ('<span class="text-green-600">Never</span>')
+                        }
+                    </td>
+                </tr>
+            \`).join('');
+        }
+
+        // UI helpers
+        function showLoading(show) {
+            loading.classList.toggle('hidden', !show);
+        }
+
+        function showError(message) {
+            error.classList.remove('hidden');
+            error.querySelector('p').textContent = message;
+        }
+
+        function hideError() {
+            error.classList.add('hidden');
         }
     </script>
 </body>
