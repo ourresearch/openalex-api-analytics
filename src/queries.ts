@@ -102,17 +102,24 @@ export async function getTopUsers(env: Env, period: Period = 'hour', limit: numb
             .sort((a, b) => b[1].totalRequests - a[1].totalRequests)
             .slice(0, limit);
 
-        // Get user information from D1 for each API key
-        const topUsers: TopUser[] = [];
+        // Get user information from D1 for all API keys in a single batch query
+        const apiKeys = sortedUsers.map(([apiKey]) => apiKey);
+        const placeholders = apiKeys.map(() => '?').join(',');
 
-        for (const [apiKey, stats] of sortedUsers) {
-            // Look up user info in D1
-            const userInfo = await env.DB
-                .prepare('SELECT name, email, organization FROM api_keys WHERE api_key = ?')
-                .bind(apiKey)
-                .first<{ name: string; email: string; organization: string }>();
+        const userInfoResults = await env.DB
+            .prepare(`SELECT api_key, name, email, organization FROM api_keys WHERE api_key IN (${placeholders})`)
+            .bind(...apiKeys)
+            .all<{ api_key: string; name: string; email: string; organization: string }>();
 
-            topUsers.push({
+        // Create a map for quick lookups
+        const userInfoMap = new Map(
+            userInfoResults.results?.map(user => [user.api_key, user]) || []
+        );
+
+        // Build the final result array
+        const topUsers: TopUser[] = sortedUsers.map(([apiKey, stats]) => {
+            const userInfo = userInfoMap.get(apiKey);
+            return {
                 apiKey,
                 name: userInfo?.name || null,
                 email: userInfo?.email || null,
@@ -121,8 +128,8 @@ export async function getTopUsers(env: Env, period: Period = 'hour', limit: numb
                 requestsPerSecond: Math.round((stats.totalRequests / periodDurationSeconds) * 100) / 100,
                 avgResponseTime: Math.round((stats.totalResponseTime / stats.totalRequests) * 100) / 100,
                 successRate: Math.round((stats.successfulRequests / stats.totalRequests) * 10000) / 100
-            });
-        }
+            };
+        });
 
         return topUsers;
     } catch (error) {

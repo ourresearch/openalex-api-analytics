@@ -8,7 +8,7 @@ export default {
         // CORS headers for API requests
         const corsHeaders = {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, PATCH, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type',
         };
 
@@ -28,7 +28,7 @@ export default {
 
         // Route: API endpoints
         if (url.pathname.startsWith('/api/')) {
-            return handleApiRequest(url, env, corsHeaders);
+            return handleApiRequest(request, url, env, corsHeaders);
         }
 
         // Route: Serve HTML dashboard
@@ -133,7 +133,7 @@ function checkAuth(request: Request, env: Env): Response | null {
 /**
  * Handle API requests
  */
-async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, string>): Promise<Response> {
+async function handleApiRequest(request: Request, url: URL, env: Env, corsHeaders: Record<string, string>): Promise<Response> {
     try {
         const period = (url.searchParams.get('period') || 'hour') as Period;
         const limit = parseInt(url.searchParams.get('limit') || '10', 10);
@@ -365,38 +365,97 @@ async function handleApiRequest(url: URL, env: Env, corsHeaders: Record<string, 
 
         // Route: Get all API keys
         if (url.pathname === '/api/api-keys') {
-            try {
-                const result = await env.DB
-                    .prepare(`
-                        SELECT
-                            id,
-                            api_key,
-                            email,
-                            name,
-                            organization,
-                            is_academic,
-                            max_per_second,
-                            max_per_day,
-                            premium_domain,
-                            created_at,
-                            expires_at,
-                            credit_card_on_file
-                        FROM api_keys
-                        ORDER BY created_at DESC
-                    `)
-                    .all();
+            if (request.method === 'GET') {
+                try {
+                    const result = await env.DB
+                        .prepare(`
+                            SELECT
+                                id,
+                                api_key,
+                                email,
+                                name,
+                                organization,
+                                is_academic,
+                                max_per_second,
+                                max_per_day,
+                                premium_domain,
+                                created_at,
+                                expires_at,
+                                credit_card_on_file
+                            FROM api_keys
+                            ORDER BY created_at DESC
+                        `)
+                        .all();
 
-                return jsonResponse({
-                    data: result.results,
-                    count: result.results.length,
-                    timestamp: new Date().toISOString()
-                }, 200, corsHeaders);
-            } catch (error) {
-                console.error('Error fetching API keys:', error);
-                return jsonResponse({
-                    error: 'Failed to fetch API keys',
-                    message: error instanceof Error ? error.message : 'Unknown error'
-                }, 500, corsHeaders);
+                    return jsonResponse({
+                        data: result.results,
+                        count: result.results.length,
+                        timestamp: new Date().toISOString()
+                    }, 200, corsHeaders);
+                } catch (error) {
+                    console.error('Error fetching API keys:', error);
+                    return jsonResponse({
+                        error: 'Failed to fetch API keys',
+                        message: error instanceof Error ? error.message : 'Unknown error'
+                    }, 500, corsHeaders);
+                }
+            }
+
+            if (request.method === 'PATCH') {
+                try {
+                    const body = await request.json() as { id: number; name?: string; max_per_second?: number };
+
+                    if (!body.id) {
+                        return jsonResponse({
+                            error: 'Missing required field: id'
+                        }, 400, corsHeaders);
+                    }
+
+                    // Build update query based on provided fields
+                    const updates: string[] = [];
+                    const values: any[] = [];
+
+                    if (body.name !== undefined) {
+                        updates.push('name = ?');
+                        values.push(body.name);
+                    }
+
+                    if (body.max_per_second !== undefined) {
+                        updates.push('max_per_second = ?');
+                        values.push(body.max_per_second);
+                    }
+
+                    if (updates.length === 0) {
+                        return jsonResponse({
+                            error: 'No fields to update'
+                        }, 400, corsHeaders);
+                    }
+
+                    // Add id to values for WHERE clause
+                    values.push(body.id);
+
+                    const updateQuery = `
+                        UPDATE api_keys
+                        SET ${updates.join(', ')}
+                        WHERE id = ?
+                    `;
+
+                    await env.DB
+                        .prepare(updateQuery)
+                        .bind(...values)
+                        .run();
+
+                    return jsonResponse({
+                        success: true,
+                        message: 'API key updated successfully'
+                    }, 200, corsHeaders);
+                } catch (error) {
+                    console.error('Error updating API key:', error);
+                    return jsonResponse({
+                        error: 'Failed to update API key',
+                        message: error instanceof Error ? error.message : 'Unknown error'
+                    }, 500, corsHeaders);
+                }
             }
         }
 
@@ -1823,29 +1882,42 @@ function getApiKeysPage(): string {
             }
         }
 
+        // Store all keys globally
+        let allKeys = [];
+
         // Render API keys table
         function renderApiKeys(keys) {
+            allKeys = keys; // Store for editing
+
             if (!keys || keys.length === 0) {
                 apiKeysTable.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500">No API keys found</td></tr>';
                 return;
             }
 
             apiKeysTable.innerHTML = keys.map((key, index) => \`
-                <tr class="border-b border-gray-200 hover:bg-gray-50">
+                <tr class="border-b border-gray-200 hover:bg-gray-50" data-key-id="\${key.id}">
                     <td class="py-2 px-2 text-gray-600">\${index + 1}</td>
                     <td class="py-2 px-2">
                         <code class="text-xs bg-gray-100 px-2 py-1 rounded">\${key.api_key || 'N/A'}</code>
                     </td>
                     <td class="py-2 px-2 text-gray-800">\${key.organization || 'N/A'}</td>
-                    <td class="py-2 px-2 text-gray-800">\${key.name || 'N/A'}</td>
+                    <td class="py-2 px-2 text-gray-800 editable cursor-pointer hover:bg-blue-50" data-field="name" data-type="text" title="Click to edit">
+                        <div class="flex items-center gap-2">
+                            <span class="value">\${key.name || 'N/A'}</span>
+                            <span class="text-gray-400 text-xs">✎</span>
+                        </div>
+                    </td>
                     <td class="py-2 px-2 text-gray-800">\${key.email || 'N/A'}</td>
                     <td class="py-2 px-2 text-center">
                         <span class="inline-block px-2 py-1 rounded text-xs font-medium \${key.is_academic ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'}">
                             \${key.is_academic ? 'Yes' : 'No'}
                         </span>
                     </td>
-                    <td class="py-2 px-2 text-right text-gray-800">
-                        <div>\${key.max_per_second || 'N/A'}/s</div>
+                    <td class="py-2 px-2 text-right text-gray-800 editable cursor-pointer hover:bg-blue-50" data-field="max_per_second" data-type="number" title="Click to edit">
+                        <div class="flex items-center justify-end gap-2">
+                            <span class="value">\${key.max_per_second || 'N/A'}/s</span>
+                            <span class="text-gray-400 text-xs">✎</span>
+                        </div>
                         <div class="text-xs text-gray-500">\${key.max_per_day ? (key.max_per_day.toLocaleString() + '/day') : 'N/A'}</div>
                     </td>
                     <td class="py-2 px-2 text-gray-600 text-xs">
@@ -1859,6 +1931,9 @@ function getApiKeysPage(): string {
                     </td>
                 </tr>
             \`).join('');
+
+            // Set up inline editing
+            setupInlineEditing();
         }
 
         // UI helpers
@@ -1873,6 +1948,150 @@ function getApiKeysPage(): string {
 
         function hideError() {
             error.classList.add('hidden');
+        }
+
+        // Inline editing functionality
+        function setupInlineEditing() {
+            const editableCells = document.querySelectorAll('.editable');
+
+            editableCells.forEach(cell => {
+                cell.addEventListener('click', function() {
+                    // Don't create multiple inputs
+                    if (this.querySelector('input')) return;
+
+                    const row = this.closest('tr');
+                    const keyId = row.dataset.keyId;
+                    const field = this.dataset.field;
+                    const type = this.dataset.type;
+                    const valueSpan = this.querySelector('.value');
+
+                    // Get current value
+                    let currentValue = valueSpan.textContent;
+                    if (field === 'max_per_second') {
+                        currentValue = currentValue.replace('/s', '').trim();
+                    }
+                    if (currentValue === 'N/A') {
+                        currentValue = '';
+                    }
+
+                    // Create input
+                    const input = document.createElement('input');
+                    input.type = type;
+                    input.value = currentValue;
+                    input.className = 'w-full px-2 py-1 border border-blue-400 rounded focus:outline-none focus:border-blue-600';
+
+                    // Save original content
+                    const originalContent = this.innerHTML;
+
+                    // Replace content with input
+                    this.innerHTML = '';
+                    this.appendChild(input);
+                    input.focus();
+                    input.select();
+
+                    // Save function
+                    const save = async () => {
+                        const newValue = input.value.trim();
+
+                        // Skip if no change
+                        if (newValue === currentValue || (newValue === '' && currentValue === '')) {
+                            this.innerHTML = originalContent;
+                            return;
+                        }
+
+                        try {
+                            // Prepare update data
+                            const updateData = {
+                                id: parseInt(keyId)
+                            };
+
+                            if (field === 'name') {
+                                updateData.name = newValue;
+                            } else if (field === 'max_per_second') {
+                                updateData.max_per_second = newValue === '' ? null : parseInt(newValue);
+                            }
+
+                            // Show loading
+                            this.innerHTML = '<span class="text-gray-500">Saving...</span>';
+
+                            // Send update request
+                            const response = await fetch('/api/api-keys', {
+                                method: 'PATCH',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify(updateData)
+                            });
+
+                            if (!response.ok) {
+                                throw new Error('Failed to update');
+                            }
+
+                            // Update local data
+                            const key = allKeys.find(k => k.id === parseInt(keyId));
+                            if (key) {
+                                if (field === 'name') {
+                                    key.name = newValue;
+                                } else if (field === 'max_per_second') {
+                                    key.max_per_second = newValue === '' ? null : parseInt(newValue);
+                                }
+                            }
+
+                            // Update display
+                            if (field === 'name') {
+                                this.innerHTML = \`
+                                    <div class="flex items-center gap-2">
+                                        <span class="value">\${newValue || 'N/A'}</span>
+                                        <span class="text-gray-400 text-xs">✎</span>
+                                    </div>
+                                \`;
+                            } else if (field === 'max_per_second') {
+                                this.innerHTML = \`
+                                    <div class="flex items-center justify-end gap-2">
+                                        <span class="value">\${newValue || 'N/A'}/s</span>
+                                        <span class="text-gray-400 text-xs">✎</span>
+                                    </div>
+                                    <div class="text-xs text-gray-500">\${key.max_per_day ? (key.max_per_day.toLocaleString() + '/day') : 'N/A'}</div>
+                                \`;
+                            }
+
+                            // Show success message briefly
+                            const successMsg = document.createElement('span');
+                            successMsg.textContent = '✓ Saved';
+                            successMsg.className = 'text-green-600 text-xs ml-2';
+                            this.querySelector('.value').parentElement.appendChild(successMsg);
+                            setTimeout(() => successMsg.remove(), 2000);
+
+                        } catch (err) {
+                            console.error('Error updating:', err);
+                            showError('Failed to update. Please try again.');
+                            this.innerHTML = originalContent;
+                        }
+                    };
+
+                    // Cancel function
+                    const cancel = () => {
+                        this.innerHTML = originalContent;
+                    };
+
+                    // Handle key events
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            save();
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cancel();
+                        }
+                    });
+
+                    // Handle blur (click outside)
+                    input.addEventListener('blur', () => {
+                        // Small delay to allow Enter to process first
+                        setTimeout(save, 100);
+                    });
+                });
+            });
         }
     </script>
 </body>
