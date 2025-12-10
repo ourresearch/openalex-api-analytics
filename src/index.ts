@@ -382,7 +382,7 @@ async function handleApiRequest(request: Request, url: URL, env: Env, corsHeader
                                 created_at,
                                 expires_at,
                                 credit_card_on_file
-                            FROM api_keys
+                            FROM api_keys_archive
                             ORDER BY created_at DESC
                         `)
                         .all();
@@ -435,7 +435,7 @@ async function handleApiRequest(request: Request, url: URL, env: Env, corsHeader
                     values.push(body.id);
 
                     const updateQuery = `
-                        UPDATE api_keys
+                        UPDATE api_keys_archive
                         SET ${updates.join(', ')}
                         WHERE id = ?
                     `;

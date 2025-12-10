@@ -107,7 +107,7 @@ export async function getTopUsers(env: Env, period: Period = 'hour', limit: numb
         const placeholders = apiKeys.map(() => '?').join(',');
 
         const userInfoResults = await env.DB
-            .prepare(`SELECT api_key, name, email, organization FROM api_keys WHERE api_key IN (${placeholders})`)
+            .prepare(`SELECT api_key, name, email, organization FROM api_keys_archive WHERE api_key IN (${placeholders})`)
             .bind(...apiKeys)
             .all<{ api_key: string; name: string; email: string; organization: string }>();
 
